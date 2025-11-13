@@ -16,7 +16,7 @@
 #include "pm8150l.dtsi"
 
 / {
-	model = "DG Pi RB5 Pro";
+	model = "SG865";
 	compatible = "qcom,qrb5165-rb5", "qcom,sm8250";
 	qcom,msm-id = <455 0x20001>;
 	qcom,board-id = <11 3>;
@@ -57,36 +57,18 @@
 		};
 	};
 
-	leds {
-		compatible = "gpio-leds";
+	pwm_leds {
+        	compatible = "pwm-leds";
 
-		led-user4 {
-			label = "green:user4";
-			function = LED_FUNCTION_INDICATOR;
+ 		led-green-pwm {
+            		label = "green:pwm";
+			pwms = <&pm8150l_lpg 1 319375>;
+            		max-brightness = <255>;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&pm8150_gpios 10 GPIO_ACTIVE_HIGH>;
-			default-state = "off";
-			panic-indicator;
-		};
-
-		led-wlan {
-			label = "yellow:wlan";
-			function = LED_FUNCTION_WLAN;
-			color = <LED_COLOR_ID_YELLOW>;
-			gpios = <&pm8150_gpios 9 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "phy0tx";
-			default-state = "off";
-		};
-
-		led-bt {
-			label = "blue:bt";
-			function = LED_FUNCTION_BLUETOOTH;
-			color = <LED_COLOR_ID_BLUE>;
-			gpios = <&pm8150_gpios 7 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "bluetooth-power";
-			default-state = "off";
-		};
-	};
+			linux,default-trigger = "activity";
+            		default-state = "off";
+        	};
+    	};
 
 	lt9611_1v2: lt9611-vdd12-regulator {
 		compatible = "regulator-fixed";
@@ -170,41 +152,6 @@
 	};
 
 	thermal-zones {
-		conn-thermal {
-			thermal-sensors = <&pm8150b_adc_tm 0>;
-
-			trips {
-				active-config0 {
-					temperature = <125000>;
-					hysteresis = <1000>;
-					type = "critical";
-				};
-			};
-		};
-
-		pm8150l-pcb-thermal {
-			thermal-sensors = <&pm8150l_adc_tm 1>;
-
-			trips {
-				active-config0 {
-					temperature = <50000>;
-					hysteresis = <4000>;
-					type = "passive";
-				};
-			};
-		};
-
-		skin-msm-thermal {
-			thermal-sensors = <&pm8150l_adc_tm 0>;
-
-			trips {
-				active-config0 {
-					temperature = <50000>;
-					hysteresis = <4000>;
-					type = "passive";
-				};
-			};
-		};
 
 		wifi-thermal {
 			thermal-sensors = <&pm8150_adc_tm 1>;
@@ -381,7 +328,7 @@
 		cooling-levels = <160 140 120 100 80 60 40 10>;
 		#cooling-cells = <2>;
 		fan-supply = <&fan_pwr>;
-		pwms = <&pm8150l_lpg 4 100000>;
+		pwms = <&pm8150l_lpg 4 50000>; // 20 kHz
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&pwm_out_default>;
