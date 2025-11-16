@@ -216,13 +216,13 @@
 				};
 
 				cluster1_fan5: trip-point7 {
-					temperature = <79000>;
+					temperature = <80000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
 
 				cluster1_fan6: trip-point8 {
-					temperature = <82000>;
+					temperature = <83000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
@@ -325,7 +325,7 @@
 	fan: pwm-fan {
 		compatible = "pwm-fan";
 		/* level (0, 1, 2, 3, 4, 5, 6, 7) */
-		cooling-levels = <170 100 90 80 70 60 50 30>;
+		cooling-levels = <170 90 80 70 60 55 50 30>;
 		#cooling-cells = <2>;
 		fan-supply = <&fan_pwr>;
 		pwms = <&pm8150l_lpg 4 50000>; // 20 kHz
