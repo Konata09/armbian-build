@@ -186,43 +186,43 @@
 				};
 
 				cluster1_fan0: trip-point2 {
-					temperature = <50000>;
+					temperature = <62000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
 
 				cluster1_fan1: trip-point3 {
-					temperature = <55000>;
+					temperature = <67000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
 
 				cluster1_fan2: trip-point4 {
-					temperature = <60000>;
-					hysteresis = <2000>;
-					type = "active";
-				};
-
-				cluster1_fan3: trip-point5 {
-					temperature = <65000>;
-					hysteresis = <2000>;
-					type = "active";
-				};
-
-				cluster1_fan4: trip-point6 {
 					temperature = <70000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
 
+				cluster1_fan3: trip-point5 {
+					temperature = <73000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+
+				cluster1_fan4: trip-point6 {
+					temperature = <76000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+
 				cluster1_fan5: trip-point7 {
-					temperature = <75000>;
+					temperature = <79000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
 
 				cluster1_fan6: trip-point8 {
-					temperature = <80000>;
+					temperature = <82000>;
 					hysteresis = <2000>;
 					type = "active";
 				};
@@ -325,7 +325,7 @@
 	fan: pwm-fan {
 		compatible = "pwm-fan";
 		/* level (0, 1, 2, 3, 4, 5, 6, 7) */
-		cooling-levels = <160 140 120 100 80 60 40 10>;
+		cooling-levels = <170 100 90 80 70 60 50 30>;
 		#cooling-cells = <2>;
 		fan-supply = <&fan_pwr>;
 		pwms = <&pm8150l_lpg 4 50000>; // 20 kHz
