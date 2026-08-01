@@ -30,12 +30,12 @@ function post_family_config__thundercomm_eb5_bootenv() {
 	declare -g BOOTENV_FILE="qcom-abl-slot-a.txt"
 	display_alert "${BOARD}" "boot slot: A (boot_a)" "info"
 
-	# 内核配置同样是家族级共享的：LINUXCONFIG 默认解析成 linux-sm8250-current，
-	# 那份配置由 5 块 sm8250 板共用。EB5 需要 LAN743X 等板载器件的驱动，
-	# 直接改共享配置会波及其它板（实测会误删蓝牙/ath9k/rfkill 等）。
-	# 这里改指向板级专属配置 config/kernel/linux-sm8250-eb5-current.config。
-	declare -g LINUXCONFIG="linux-sm8250-eb5-current"
-	display_alert "${BOARD}" "kernel config: ${LINUXCONFIG}" "info"
+	if [[ -f "${USERPATCHES_PATH}/config/kernel/linux-sm8250-eb5-${BRANCH}.config" ]]; then
+		declare -g LINUXCONFIG="linux-sm8250-eb5-${BRANCH}"
+		display_alert "${BOARD}" "kernel config: ${LINUXCONFIG}" "info"
+	else
+		display_alert "${BOARD}" "no board kernel config for BRANCH=${BRANCH}" "wrn"
+	fi
 }
 
 # clk_ignore_unused / pd_ignore_unused：主线对 SM8250 的时钟/电源域引用计数不完整，
@@ -99,7 +99,7 @@ function post_build_image__950_thundercomm_eb5_rebuild_bootimg() {
 
 	declare workdir="${DESTIMG}/eb5-bootimg"
 	declare mnt="${workdir}/mnt"
-	declare img="${DESTIMG}/${version}.boot_${EB5_ABL_DTB}.img"
+	declare img="${DESTIMG}/${version}.boot.img"
 
 	run_host_command_logged mkdir -pv "${mnt}"
 	run_host_command_logged mount -o ro "${ROOTFS_IMAGE_FILE}" "${mnt}"
@@ -254,13 +254,4 @@ function post_family_tweaks_bsp__thundercomm_eb5_lan7430_led() {
 	add_file_from_stdin_to_bsp_destination "/etc/udev/rules.d/70-eb5-lan7430-led.rules" <<- 'LED_RULE'
 		ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="lan743x", ATTR{vendor}=="0x1055", ATTR{device}=="0x7430", RUN+="/usr/local/sbin/lan7430-led-enable %k"
 	LED_RULE
-}
-
-
-function post_family_tweaks__thundercomm_eb5_enable_services() {
-	display_alert "$BOARD" "Enable services" "info"
-	chroot_sdcard systemctl enable eb5-pcie-coldboot.service
-	# 没有驱动支持挂起
-	chroot_sdcard systemctl mask suspend.target
-	return 0
 }
