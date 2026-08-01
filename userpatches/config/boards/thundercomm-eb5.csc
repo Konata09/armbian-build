@@ -207,9 +207,13 @@ function post_family_tweaks_bsp__thundercomm_eb5_lan7430_led() {
 	LED_SCRIPT
 	run_host_command_logged chmod -v +x "${file_added_to_bsp_destination}"
 
-	# 用 bind 而非 add：驱动 probe 里会做软复位(SRST)清空 HW_CFG，必须等 probe 完成后再写
+	# add 与 bind 都要匹配：
+	#   - bind: 驱动 probe 里会做软复位(SRST)清空 HW_CFG，热插拔/重新绑定时须等 probe 完成再写
+	#   - add : lan743x 编入内核(=y)，绑定早于 udevd 启动，冷启动时只有
+	#           systemd-udev-trigger 的 --action=add 重放能看到设备；
+	#           只写 bind 的话开机永远不触发，网口灯不亮。
 	add_file_from_stdin_to_bsp_destination "/etc/udev/rules.d/70-eb5-lan7430-led.rules" <<- 'LED_RULE'
-		ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="lan743x", ATTR{vendor}=="0x1055", ATTR{device}=="0x7430", RUN+="/usr/local/sbin/lan7430-led-enable %k"
+		ACTION=="add|bind", SUBSYSTEM=="pci", DRIVER=="lan743x", ATTR{vendor}=="0x1055", ATTR{device}=="0x7430", RUN+="/usr/local/sbin/lan7430-led-enable %k"
 	LED_RULE
 }
 
