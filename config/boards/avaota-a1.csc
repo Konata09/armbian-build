@@ -1,7 +1,9 @@
 # Allwinner Cortex-A55 octa core 2/4GB RAM SoC USB3 USB-C 2x GbE LCD
 BOARD_NAME="Avaota A1"
+BOARD_VENDOR="allwinner"
 BOARDFAMILY="sun55iw3-syterkit"
 BOARD_MAINTAINER="chainsx"
+INTRODUCED="2024"
 KERNEL_TARGET="legacy"
 BOOT_FDT_FILE="allwinner/sun55i-t527-avaota-a1.dtb"
 SRC_EXTLINUX="yes"

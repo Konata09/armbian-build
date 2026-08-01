@@ -1,7 +1,9 @@
 # Allwinner H2+ quad core 256/512MB RAM SoC WiFi SPI
 BOARD_NAME="Orange Pi Zero"
+BOARD_VENDOR="xunlong"
 BOARDFAMILY="sun8i"
 BOARD_MAINTAINER=""
+INTRODUCED="2016"
 BOOTCONFIG="orangepi_zero_defconfig"
 MODULES_CURRENT="g_serial"
 MODULES_BLACKLIST="sunxi_cedrus"

@@ -10,9 +10,8 @@ rockchip (Rockchip)
 
 - i2c7, i2c8, pcie-gen2, spi-spidev, uart4, w1-gpio
 
-for RK3308 (Rock PI-S)
-
-- rk3308bs rk3308bs-1.3ghz sdio-10mhz sdio-4mhz emmc
+for RK3308:
+- b@1,3ghz, bs, bs-1.3ghz, otg-host, uart1, uart2, uart3, s0-ext-antenna
 
 ### Overlay details:
 
@@ -233,6 +232,14 @@ To configure the OTG USB port as an additional host port:
 
 
 **********************************
+RK3308 enable uart  (31 Oct 2025):
+
+###  rk3308-uart1
+###  rk3308-uart2
+###  rk3308-uart3
+
+
+**********************************
 Details for Rock Pi-S overlays  (14 Sep 2025):
 
 Older V1.1 and V1.2 boards use the B variant of the RK3308.
@@ -285,3 +292,15 @@ Some NanoPC-T6 boards use a A3A444 eMMC chip. Under heavy I/O load when running
 in HS400 mode, this will often result in I/O errors.
 Reducing the eMMC frequency from the default 200000000 Hz to 150000000 Hz improves
 stability and eliminates the I/O errors.
+
+**********************************
+Details for Rock 5 ITX overlays:
+
+### rockchip-rk3588-rock-5-itx-pwm-fan
+
+The Rock 5 ITX DTB defines the fan as a /pwm-fan node without a labelled phandle,
+so the generic rockchip-rk3588-fanctrl overlay (which targets &fan) does not apply.
+This overlay patches the /pwm-fan node directly, fixing the default cooling-levels
+which start at 0 — causing the fan to receive no PWM signal at idle and default to
+full speed. The corrected curve starts at 1 (near-silent) and ramps through four
+steps tied to temperature trip points (45°C / 50°C / 55°C / 65°C).

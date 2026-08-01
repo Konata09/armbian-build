@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 function fetch_sources_tools__gxlimg() {
-	fetch_from_repo "${GITHUB_SOURCE}/retro98boy/gxlimg" "gxlimg" "commit:fde6a3dd0e13875a5b219389c0a6137616eaebdb"
+	# Branch: master, Commit date: Nov 10, 2025 (please update when updating commit ref)
+	fetch_from_repo "${GITHUB_SOURCE}/repk/gxlimg" "gxlimg" "commit:37a3ea072ca81bb3872441a09fe758340fd67dcb"
 }
 
 function build_host_tools__compile_gxlimg() {
@@ -59,7 +60,7 @@ function gxlimg_repack_fip_with_new_uboot() {
 				-s raw-u-boot.bin \
 				"${EXTRACT_DIR}/bl33.enc"
 
-			if [ -e "${EXTRACT_DIR}/lpddr3_1d.fw" ]; then
+			if [[ -e "${EXTRACT_DIR}/lpddr3_1d.fw" ]]; then
 				run_host_command_logged gxlimg \
 					-t fip \
 					--bl2 "${EXTRACT_DIR}/bl2.sign" \
@@ -100,7 +101,7 @@ function gxlimg_repack_fip_with_new_uboot() {
 			;;
 	esac
 
-	if [ ! -s u-boot.bin ]; then
+	if [[ ! -s u-boot.bin ]]; then
 		exit_with_error "FIP repack produced empty u-boot.bin"
 	fi
 }

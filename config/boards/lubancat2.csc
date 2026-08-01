@@ -1,8 +1,10 @@
 # Rockchip RK3568 quad core SOC with 1-8GB eMMC USB3
 BOARD_NAME="Lubancat2"
+BOARD_VENDOR="rockchip"
 BOARDFAMILY="rk35xx"
 BOARD_FIRMWARE_INSTALL="-full"
 BOARD_MAINTAINER="andyshrk"
+INTRODUCED="2023"
 BOOTCONFIG="lubancat-2-rk3568_defconfig"
 KERNEL_TARGET="edge"
 FULL_DESKTOP="yes"

@@ -1,7 +1,9 @@
 # Rockchip RK3566 quad core 1GB-2GB GBE eMMC USB3 WiFi
 BOARD_NAME="LCKFB Taishan Pi"
+BOARD_VENDOR="rockchip"
 BOARDFAMILY="rk35xx"
 BOARD_MAINTAINER=""
+INTRODUCED="2024"
 BOOTCONFIG="lckfb-tspi-rk3566_defconfig"
 BOOT_SOC="rk3566"
 KERNEL_TARGET="vendor,current,edge"
