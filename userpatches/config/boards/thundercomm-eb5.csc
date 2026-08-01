@@ -3,8 +3,8 @@ declare -g BOARD_VENDOR="thundercomm"
 declare -g BOARD_MAINTAINER=""
 declare -g INTRODUCED="2026"
 declare -g BOARDFAMILY="sm8250"
-declare -g KERNEL_TARGET="current,edge"
-declare -g KERNEL_TEST_TARGET="current"
+declare -g KERNEL_TARGET="edge"
+declare -g KERNEL_TEST_TARGET="edge"
 declare -g BOOTCONFIG="none"          # 由 Qualcomm ABL 引导，无 u-boot
 declare -g EXTRAWIFI="no"
 declare -g IMAGE_PARTITION_TABLE="gpt"
@@ -211,4 +211,27 @@ function post_family_tweaks_bsp__thundercomm_eb5_lan7430_led() {
 	add_file_from_stdin_to_bsp_destination "/etc/udev/rules.d/70-eb5-lan7430-led.rules" <<- 'LED_RULE'
 		ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="lan743x", ATTR{vendor}=="0x1055", ATTR{device}=="0x7430", RUN+="/usr/local/sbin/lan7430-led-enable %k"
 	LED_RULE
+}
+
+#
+# 关闭 UFS 时钟门控。
+#
+# drivers/ufs/host/ufs-qcom.c 的 ufs_qcom_set_caps() 无条件设了
+#   UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING
+# 控制器空闲 150ms（clkgate_delay_ms 默认值）就尝试进 hibern8 低功耗态。
+# 本板上这个动作不可靠，某次进入会超时并把整条 UFS 链路搞断：
+#
+#   ufshcd-qcom 1d84000.ufshc: pwr ctrl cmd 0x17 with mode 0x0 completion timeout
+#   ufshcd-qcom 1d84000.ufshc: ufshcd_uic_hibern8_enter: hibern8 enter failed. ret = -110
+#   ufshcd-qcom 1d84000.ufshc: ufshcd_gate_work: hibern8 enter failed -110
+#   ufshcd-qcom 1d84000.ufshc: ... HBA state eh_fatal; ... link is broken
+#
+# 只关 gating，CLK_SCALING（按负载调频）保留，省电能力基本不受影响。
+#
+function post_family_tweaks_bsp__thundercomm_eb5_ufs_no_clkgate() {
+	display_alert "Adding to bsp-cli" "${BOARD}: disable UFS clock gating" "info"
+
+	add_file_from_stdin_to_bsp_destination "/etc/udev/rules.d/60-eb5-ufs-clkgate.rules" <<- UFS_RULE
+		ACTION=="add", SUBSYSTEM=="platform", KERNEL=="*.ufshc", ATTR{clkgate_enable}=="?*", ATTR{clkgate_enable}="0"
+	UFS_RULE
 }
