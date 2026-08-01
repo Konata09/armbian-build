@@ -1,5 +1,3 @@
-# Thundercomm TurboX EB5U — Qualcomm QRB5165 (SM8250) octa core, 12GB RAM, 128GB UFS
-# 板载 2x LAN7430 1GbE + M.2 槽（本机装了 RTL8126 5GbE）, NVMe, CAN, USB Hub
 declare -g BOARD_NAME="Thundercomm TurboX EB5U"
 declare -g BOARD_VENDOR="thundercomm"
 declare -g BOARD_MAINTAINER=""
@@ -19,8 +17,6 @@ declare -g SERIALCON="${SERIALCON:-ttyMSM0}"
 declare -g -a ABL_DTB_LIST=()
 declare -g EB5_ABL_DTB="qrb5165-thundercomm-eb5"
 
-# 本机 boot_a 是活动槽（生产系统也在 A 槽）。
-# 注意：QTI 的槽位切换不是 Android 标准，除 `fastboot set_active` 外不要用别的方式切槽。
 # 注意：家族配置 config/sources/families/sm8250.conf 在板级配置之后被 source，
 # 其中无条件写死 BOOTENV_FILE="qcom-abl.txt"（对应 boot_b），会覆盖这里的赋值。
 # 因此必须用 post_family_config 钩子在家族配置之后再设置一次。
@@ -38,42 +34,17 @@ function post_family_config__thundercomm_eb5_bootenv() {
 	fi
 }
 
-# clk_ignore_unused / pd_ignore_unused：主线对 SM8250 的时钟/电源域引用计数不完整，
-#   不加会在启动早期关掉仍在用的时钟
-# pcie_pme=nomsi：SM8250 的 PCIe PME 走 MSI 有问题
-# earlycon 地址 0xa90000 = uart12(ttyMSM0)，与厂商一致
 declare -g BOOTIMG_CMDLINE_EXTRA="clk_ignore_unused pd_ignore_unused loglevel=7 audit=0 allow_mismatched_32bit_el0 mem_sleep_default=s2idle earlycon=qcom_geni,0xa90000 console=ttyMSM0,115200n8 pcie_pme=nomsi"
 
-# QCA6390 WiFi/BT 的固件在 armbian-firmware-full 里。
-# 如果确定不用无线，可以去掉这行以缩小镜像。
+# QCA6390 WiFi/BT 固件
 # declare -g BOARD_FIRMWARE_INSTALL="-full"
 
 declare -g PACKAGE_LIST_BOARD="pciutils ethtool nvme-cli"
 
-#
-# 内核配置
-# ---------
-# 这块板用的是 config/kernel/linux-sm8250-eb5-current.config，
-# 由上面 post_family_config 钩子里的 LINUXCONFIG 指定，与其它 4 块 sm8250 板隔离。
-# 板级配置里不做 custom_kernel_config 干预，改配置请直接 menuconfig：
-#
-#   ./compile.sh BOARD=thundercomm-eb5 BRANCH=current RELEASE=trixie KERNEL_CONFIGURE=yes
-#
-# 退出 menuconfig 后框架会 savedefconfig 并写回上面那个板级配置文件。
-#
-# ⚠️ KERNEL_CONFIGURE=yes 有个坑：这种模式下内核 deb 文件名里的配置哈希段是
-#    固定占位符 C999999，不是真实哈希 —— 也就是说每次交互式定制产出的 deb 都同名。
-#    output/debs/ 里若已有同名旧包，新包不会覆盖它，装进 rootfs 的会是旧内核。
-#    症状是：menuconfig 里明明开了某个驱动、构建日志里也能看到它被编译，
-#    但最终镜像里没有。定制完成后建议：
-#      rm -f output/debs/*C999999*.deb
-#      ./compile.sh ... KERNEL_CONFIGURE=no      # 此时哈希是真实值，不会重名
-#
 # ⚠️ QCOM_Q6V5_PAS / QCOM_Q6V5_MSS 必须保持关闭。
 #    打开后内核会把 ADSP/CDSP/SLPI 拉起来，关机时 glink-edge/fastrpc 的 udev
 #    事件处理会卡死，且 PSCI SYSTEM_RESET 挂住 —— 表现为 systemd 打完
 #    "Rebooting." 之后再无输出、机器不复位，只能断电。
-#
 #
 # 完整接管 ABL boot.img 的生成。
 #
@@ -128,11 +99,6 @@ function post_build_image__950_thundercomm_eb5_rebuild_bootimg() {
 
 	declare cmdline="root=UUID=${uuid} rootwait rw ${BOOTIMG_CMDLINE_EXTRA}"
 
-	# 不用容器里的 /usr/bin/mkbootimg —— 它缺 gki 模块，一跑就
-	# ModuleNotFoundError: No module named 'gki'（公共扩展也栽在这上面）。
-	# boot_img_hdr_v0 结构很简单，这里直接生成，顺便把本机 ABL 需要的
-	# 加载地址一次写对（kernel 0x80008000 / ramdisk 0x81208000 /
-	# second 0x80f00000 / tags 0x80000100，与原厂 boot_a 逐字段一致）。
 	cat > "${workdir}/mkboot.py" <<- 'EB5_MKBOOT'
 		import hashlib, struct, sys
 
@@ -180,7 +146,6 @@ function post_build_image__950_thundercomm_eb5_rebuild_bootimg() {
 	run_host_command_logged umount "${mnt}" || true
 	run_host_command_logged rm -rf "${workdir}"
 
-	# 校验：mkbootimg 有时会静默失败，务必确认真的产出了镜像
 	if [[ ! -f "${img}" ]]; then
 		exit_with_error "mkbootimg produced no output at ${img}"
 	fi
@@ -193,7 +158,6 @@ function post_build_image__950_thundercomm_eb5_rebuild_bootimg() {
 		exit_with_error "boot image has no ANDROID! magic"
 	fi
 
-	# 这个 boot 镜像是本钩子重造的，Armbian 之前算的 .sha 已经对不上了，重算一遍。
 	if [[ -f "${img}.sha" ]]; then
 		(cd "$(dirname "${img}")" && sha256sum "$(basename "${img}")" > "$(basename "${img}").sha")
 	fi
@@ -201,25 +165,18 @@ function post_build_image__950_thundercomm_eb5_rebuild_bootimg() {
 	return 0
 }
 
-#
-# LAN7430 网口 LED。
-# 主线 lan743x 驱动没有任何 LED 初始化代码，芯片复位后 PHY 的 LED 输出
-# 不与封装引脚相连，网口灯全灭。依据 Microchip 知识库 000011849，
-# 需要置 HW_CFG(CSR 0x010) 的 LED0..3_EN(bit23:20)；本板未贴 EEPROM，
-# 还要置 EEP_GPIO_LED_PIN_DIS(bit2) 阻止 EEPROM 控制器抢占这些引脚。
-#
+# LAN7430 LED
 function post_family_tweaks_bsp__thundercomm_eb5_lan7430_led() {
 	display_alert "Adding to bsp-cli" "${BOARD}: LAN7430 LED enable" "info"
 
 	declare file_added_to_bsp_destination
 	add_file_from_stdin_to_bsp_destination "/usr/local/sbin/lan7430-led-enable" <<- 'LED_SCRIPT'
 		#!/usr/bin/env python3
-		"""LAN7430 网口 LED 使能（主线 lan743x 驱动没有 LED 初始化代码）"""
 		import mmap, os, struct, sys, glob
 
 		HW_CFG               = 0x010
-		LED_EN_ALL           = 0x00F00000   # bit23..20 = LED3..LED0 enable
-		EEP_GPIO_LED_PIN_DIS = 1 << 2       # 本板无 EEPROM，须置位释放引脚
+		LED_EN_ALL           = 0x00500004
+		EEP_GPIO_LED_PIN_DIS = 1 << 2
 
 		def enable(bdf):
 		    fd = os.open('/sys/bus/pci/devices/%s/resource0' % bdf, os.O_RDWR | os.O_SYNC)
