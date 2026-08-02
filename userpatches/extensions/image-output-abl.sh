@@ -1,5 +1,5 @@
 function add_host_dependencies__abl_host_deps() {
-	EXTRA_BUILD_DEPS+=("build-tools::mkbootimg")
+	EXTRA_BUILD_DEPS+=("build-tools::mkbootimg" "fs-tools::xfsprogs")
 }
 
 function post_build_image__900_convert_to_abl_img() {
@@ -51,7 +51,7 @@ function post_build_image__900_convert_to_abl_img() {
 		display_alert "Going to create abl kernel boot image" "${EXTENSION}" "info"
 		gzip -c "${new_rootfs_image_mount_dir}"/boot/vmlinuz-*-* > "${DESTIMG}/Image.gz"
 		for dtb_name in "${ABL_DTB_LIST[@]}"; do
-			display_alert "Creatng abl kernel boot image with dtb ${dtb_name} and cmdline ${bootimg_cmdline} " "${EXTENSION}" "info"
+			display_alert "Creating abl kernel boot image with dtb ${dtb_name} and cmdline ${bootimg_cmdline} " "${EXTENSION}" "info"
 			cat "${DESTIMG}/Image.gz" "${new_rootfs_image_mount_dir}"/usr/lib/linux-image-*/qcom/"${dtb_name}.dtb" > "${DESTIMG}/Image.gz-${dtb_name}"
 			/usr/bin/mkbootimg \
 				--kernel "${DESTIMG}/Image.gz-${dtb_name}" \
