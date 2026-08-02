@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: BSD-3-Clause
+#include "qrb5165-rb5.dts"
+
+/ {
+	model = "Thundercomm TurboX EB5U";
+	compatible = "thundercomm,eb5u", "qcom,qrb5165-rb5", "qcom,sm8250";
+};
+
+/*
+ * M.2 供电
+ */
+&i2c4 {
+	status = "disabled";
+};
+
+&tlmm {
+	/*
+	 * ASM2806 交换机使能
+	 */
+	eb5_pcie_switch_hog {
+		gpio-hog;
+		gpios = <88  GPIO_ACTIVE_HIGH>,
+			<89  GPIO_ACTIVE_HIGH>,
+			<126 GPIO_ACTIVE_HIGH>,
+			<130 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "eb5-pcie-switch-enable";
+	};
+
+	/*
+	 * ASM2806 下游供电
+	 */
+	eb5_m2_slot_power_hog {
+		gpio-hog;
+		gpios = <9 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "eb5-m2-slot-power";
+	};
+
+	eb5_lan7430_power_hog {
+		gpio-hog;
+		gpios = <74 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "eb5-lan7430-power";
+	};
+
+	/* USB Hub 供电 */
+	eb5_usb_hub_power_hog {
+		gpio-hog;
+		gpios = <131 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "eb5-usb-hub-power";
+	};
+};
+
+/*
+ * ASM2806 MMU
+ */
+&pcie2 {
+	iommu-map = <0x000 &apps_smmu 0x1d00 0x1>,
+		    <0x100 &apps_smmu 0x1d01 0x1>,
+		    <0x200 &apps_smmu 0x1d02 0x1>,
+		    <0x230 &apps_smmu 0x1d03 0x1>,
+		    <0x270 &apps_smmu 0x1d04 0x1>,
+		    <0x300 &apps_smmu 0x1d05 0x1>,
+		    <0x400 &apps_smmu 0x1d06 0x1>,
+		    <0x500 &apps_smmu 0x1d07 0x1>,
+		    <0x600 &apps_smmu 0x1d08 0x1>;
+};
+
+
+/* LED */
+/ {
+	/delete-node/ leds;
+};
+
+&pm8150l_lpg {
+	status = "disabled";
+};
+
+/ {
+	eb5_leds: leds-eb5 {
+		compatible = "gpio-leds";
+
+		led-0 {
+			label = "led0";
+			gpios = <&tlmm 172 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		led-1 {
+			label = "led1";
+			gpios = <&tlmm 173 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led-2 {
+			label = "led2";
+			gpios = <&tlmm 174 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led-3 {
+			label = "led3";
+			gpios = <&tlmm 175 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led-power {
+			label = "power_led";
+			gpios = <&tlmm 75 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+	};
+};
+
+/*
+ * TUSB8044A 改为 host 模式
+ */
+&usb_1_dwc3 {
+	dr_mode = "host";
+	/delete-property/ usb-role-switch;
+};
+
+/*
+ * 禁用 LT9611UXC
+ */
+&mdss_dsi0_out {
+	/delete-property/ remote-endpoint;
+};
+
+&sound {
+	/delete-node/ hdmi-dai-link;
+};
+
+&i2c5 {
+	status = "disabled";
+	/delete-node/ hdmi-bridge@2b;
+};
+
+&mdss_dsi0 {
+	status = "disabled";
+};
+
+&mdss_dsi0_phy {
+	status = "disabled";
+};
+
+/ {
+	/delete-node/ hdmi-out;
+
+	/delete-node/ lt9611-vdd12-regulator;
+	/delete-node/ lt9611-3v3;
+};
+
+/*
+ * 禁用冲突音频节点
+ */
+&sound {
+	/delete-node/ dma-dai-link;
+};
+
+&swr0 {
+	status = "disabled";
+	/delete-node/ speaker@0,3;
+	/delete-node/ speaker@0,4;
+};
