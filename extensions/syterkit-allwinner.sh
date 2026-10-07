@@ -1,3 +1,5 @@
+# @description Writes the SyterKit bootloader to the correct offset of a finished Allwinner image. Downloads the latest `YuzukiHD/SyterKit` release for `SYTERKIT_BOARD_ID`, extracts it, and `dd`s `extlinux_boot_bin_card.bin` to the loop device at an 8KB seek. Auto-used by Allwinner boards that boot via SyterKit instead of U-Boot.
+
 #
 # SPDX-License-Identifier: GPL-2.0
 # This file is a part of the Armbian Build Framework https://github.com/armbian/build/
@@ -7,9 +9,8 @@ function post_umount_final_image__write_syterkit_to_image() {
 	display_alert "Finding SyterKit latest version" "from GitHub" "info"
 
 	# Find the latest version of SyterKit from GitHub, using JSON API, curl and jq.
-	declare api_url="https://api.github.com/repos/YuzukiHD/SyterKit/releases/latest"
 	declare latest_version
-	latest_version=$(curl -s "${api_url}" | jq -r '.tag_name')
+	latest_version="$(github_latest_release_tag "YuzukiHD/SyterKit")" || return 1
 	display_alert "Latest version of SyterKit is" "${latest_version}" "info"
 
 	# Prepare the cache dir

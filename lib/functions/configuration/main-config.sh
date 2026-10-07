@@ -271,6 +271,10 @@ function do_main_configuration() {
 			;;
 	esac
 
+	# Note: this selects the mirror for BOOTSOURCE on boards that use mainline u-boot. It no
+	# longer has anything to do with the shared u-boot bare tree, which since the move to
+	# premade ORAS git trees always comes from ${GHCR_SOURCE} -- see uboot-git-oras.sh, and
+	# GHCR_MIRROR / GIT_ORAS_TARBALLS_SHALLOW_BASE_REF for redirecting that.
 	case $UBOOT_MIRROR in
 		gitee)
 			declare -g -r MAINLINE_UBOOT_SOURCE='https://gitee.com/mirrors/u-boot.git'
@@ -283,18 +287,28 @@ function do_main_configuration() {
 			;;
 	esac
 
+	# OCI storage for artifacts (OCI_PATH) and git trees (OCI_GIT_PATH).
+	declare -g OCI_SERVER="${OCI_SERVER:-"ghcr.io"}"
+	declare -g OCI_PATH="${OCI_PATH:-"armbian/os"}"
+	declare -g OCI_GIT_PATH="${OCI_GIT_PATH:-"armbian/shallow"}"
+
+	# OCI_PROXY: optional read-only cache of OCI_SERVER (host[:port]). Never used for uploads.
+	# GHCR_MIRROR selects a public ghcr.io mirror as OCI_PROXY.
 	case $GHCR_MIRROR in
 		dockerproxy)
-			GHCR_MIRROR_ADDRESS="${GHCR_MIRROR_ADDRESS:-"ghcr.dockerproxy.net"}"
-			declare -g -r GHCR_SOURCE=$GHCR_MIRROR_ADDRESS
+			OCI_PROXY="${OCI_PROXY:-"${GHCR_MIRROR_ADDRESS:-"ghcr.dockerproxy.net"}"}"
 			;;
 		nju)
-			declare -g -r GHCR_SOURCE='ghcr.nju.edu.cn'
-			;;
-		*)
-			declare -g -r GHCR_SOURCE='ghcr.io'
+			OCI_PROXY="${OCI_PROXY:-"ghcr.nju.edu.cn"}"
 			;;
 	esac
+	declare -g OCI_PROXY="${OCI_PROXY:-}"
+
+	# Deprecated overrides: OCI_TARGET_BASE, GIT_ORAS_TARBALLS_SHALLOW_BASE_REF.
+	declare -g GIT_ORAS_TARBALLS_SHALLOW_BASE_REF="${GIT_ORAS_TARBALLS_SHALLOW_BASE_REF:-"${OCI_SERVER}/${OCI_GIT_PATH}"}"
+
+	# Deprecated. Kept for extensions and userpatches.
+	declare -g -r GHCR_SOURCE="${OCI_PROXY:-"${OCI_SERVER}"}"
 
 	# Let's set default data if not defined in board configuration above
 	[[ -z $OFFSET ]] && OFFSET=4 # offset to 1st partition (we use 4MiB boundaries by default)
@@ -397,8 +411,9 @@ function do_extra_configuration() {
 	fi
 
 	DEBIAN_MIRROR='deb.debian.org/debian'
-	# loong64 is using debian-ports repo now
-	[[ "${ARCH}" == "loong64" ]] && DEBIAN_MIRROR='deb.debian.org/debian-ports'
+	# loong64 was promoted from debian-ports into the main Debian archive (it is
+	# listed in sid's Architectures: and dropped from debian-ports), so it now uses
+	# the default deb.debian.org/debian mirror like every other architecture.
 	DEBIAN_SECURITY='security.debian.org/'
 	[[ "${ARCH}" == "amd64" ]] &&
 		UBUNTU_MIRROR='archive.ubuntu.com/ubuntu/' ||
@@ -437,15 +452,10 @@ function do_extra_configuration() {
 	# Control aria2c's usage of ipv6.
 	[[ -z $DISABLE_IPV6 ]] && DISABLE_IPV6="true"
 
-	# @TODO this is _very legacy_ and should be removed. Old-time users might have a lib.config lying around and it will mess up things.
-	# For (late) user override.
-	# Notice: it is too late to define hook functions or add extensions in lib.config, since the extension initialization already ran by now.
-	#         in case the user tries to use them in lib.config, hopefully they'll be detected as "wishful hooking" and the user will be wrn'ed.
+	# lib.config was soft-deprecated with the next-gen framework. Its documentation was removed over a year ago.
+	# @TODO: remove this check end of 2027.
 	if [[ -f $USERPATCHES_PATH/lib.config ]]; then
-		display_alert "Using user configuration override" "$USERPATCHES_PATH/lib.config" "info"
-		# shellcheck source=/dev/null
-		source "$USERPATCHES_PATH"/lib.config
-		track_general_config_variables "after sourcing lib.config"
+		exit_with_error "lib.config is not supported anymore." "Remove ${USERPATCHES_PATH}/lib.config. Use https://docs.armbian.com/build-framework/user-configurations/ instead."
 	fi
 
 	# Prepare array for extensions to fill in.
@@ -455,8 +465,6 @@ function do_extra_configuration() {
 	call_extension_method "user_config" <<- 'USER_CONFIG'
 		*Invoke function with user override*
 		Allows for overriding configuration values set anywhere else.
-		It is called after sourcing the `lib.config` file if it exists,
-		but before assembling any package lists.
 	USER_CONFIG
 	track_general_config_variables "after user_config hooks"
 

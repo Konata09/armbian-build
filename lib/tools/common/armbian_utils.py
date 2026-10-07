@@ -59,6 +59,13 @@ def get_from_env_or_bomb(env_name):
 	return value
 
 
+# Child compile.sh invocations get a minimal environment, so USERPATCHES_PATH does not reach them by itself; this is the
+# cmdline param that makes them look at the same userpatches directory we do. Empty if not set: children use the default.
+def get_userpatches_path_params() -> list[str]:
+	userpatches_path = get_from_env("USERPATCHES_PATH")
+	return [f"USERPATCHES_PATH={userpatches_path}"] if userpatches_path else []
+
+
 def yes_or_no_or_bomb(value):
 	if value == "yes":
 		return True
@@ -120,6 +127,27 @@ def to_yaml(gha_workflow):
 	return yaml.safe_dump(gha_workflow, explicit_start=True, default_flow_style=False, sort_keys=False, allow_unicode=True, indent=2, width=1000)
 
 
+# Cut a bash trailing comment off one line: the first '#' that starts a word and
+# is not inside quotes. ARMBIAN_BOARD_CONFIG_REGEX_GENERIC closes its value on
+# either quote character, greedily, so a comment carrying an apostrophe or a
+# quote swallows the rest of the line -- BOARD_NAME="Khadas VIM1S" # don't ...
+# parsed as 'Khadas VIM1S" # don', which then rode into image-info.json and
+# every consumer of it. Strip the comment before matching and the regex sees a
+# clean assignment. A '#' inside the value survives, and a line whose only '#'
+# is quoted (UBOOT_HASH_EXTRA's nested command substitution) is left untouched.
+def strip_bash_trailing_comment(line: str) -> str:
+	quote = None
+	for i, char in enumerate(line):
+		if quote is not None:
+			if char == quote:
+				quote = None
+		elif char in "'\"":
+			quote = char
+		elif char == "#" and (i == 0 or line[i - 1] in " \t"):
+			return line[:i]
+	return line
+
+
 # I've to read the first line from the board file, that's the hardware description in a pound comment.
 # Also, 'KERNEL_TARGET="legacy,current,edge"' which we need to parse.
 def armbian_parse_board_file_for_static_info(board_file, board_id, core_or_userpatched):
@@ -136,7 +164,8 @@ def armbian_parse_board_file_for_static_info(board_file, board_id, core_or_userp
 
 	# Parse generic bash vars, with a horrendous regex.
 	generic_vars = {}
-	generic_var_matches = re.findall(ARMBIAN_BOARD_CONFIG_REGEX_GENERIC, "\n".join(file_lines), re.MULTILINE)
+	board_file_body = "\n".join(strip_bash_trailing_comment(line) for line in file_lines)
+	generic_var_matches = re.findall(ARMBIAN_BOARD_CONFIG_REGEX_GENERIC, board_file_body, re.MULTILINE)
 	for generic_var_match in generic_var_matches:
 		generic_vars[generic_var_match[0]] = generic_var_match[1]
 
@@ -238,7 +267,9 @@ def find_armbian_src_path():
 		configng_yaml_dir = None
 		configng_parser = None
 
-	userpatches_boards_path = os.path.realpath(os.path.join(armbian_src_path, "userpatches", "config", "boards"))
+	# USERPATCHES_PATH is passed down by the bash side; fall back to the default location if unset or empty (eg: run standalone).
+	userpatches_path = get_from_env("USERPATCHES_PATH") or os.path.join(armbian_src_path, "userpatches")
+	userpatches_boards_path = os.path.realpath(os.path.join(userpatches_path, "config", "boards"))
 	log.debug(f"Real path to userpatches boards '{userpatches_boards_path}'")
 	has_userpatches_path = os.path.exists(userpatches_boards_path)
 
@@ -461,7 +492,7 @@ def armbian_run_command_and_parse_json_from_stdout(exec_cmd: list[str], params: 
 	try:
 		log.debug(f"Start calling Armbian command: {' '.join(exec_cmd)}")
 		result = subprocess.run(
-			exec_cmd,
+			exec_cmd + get_userpatches_path_params(),  # same userpatches directory as us, if it was pointed elsewhere
 			stdout=subprocess.PIPE,
 			check=True,
 			universal_newlines=False,  # universal_newlines messes up bash encoding, don't use, instead decode utf8 manually;

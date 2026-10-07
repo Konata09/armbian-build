@@ -140,10 +140,7 @@ function docker_cli_prepare() {
 	[[ -z "${build_suffix}" ]] && build_suffix="$(printf '%08x' "$$")" # no sha256sum: PID hex
 	declare -g DOCKER_ARMBIAN_LOCAL_IMAGE_REPO="armbian.local.only/armbian-build"
 	declare -g DOCKER_ARMBIAN_INITIAL_IMAGE_TAG="${DOCKER_ARMBIAN_LOCAL_IMAGE_REPO}:${build_suffix}"
-	# declare -g DOCKER_ARMBIAN_BASE_IMAGE="${DOCKER_ARMBIAN_BASE_IMAGE:-"debian:trixie"}"
-	# declare -g DOCKER_ARMBIAN_BASE_IMAGE="${DOCKER_ARMBIAN_BASE_IMAGE:-"debian:bookworm"}"
-	# declare -g DOCKER_ARMBIAN_BASE_IMAGE="${DOCKER_ARMBIAN_BASE_IMAGE:-"debian:sid"}"
-	declare -g DOCKER_ARMBIAN_BASE_IMAGE="${DOCKER_ARMBIAN_BASE_IMAGE:-"ubuntu:noble"}"
+	declare -g DOCKER_ARMBIAN_BASE_IMAGE="${DOCKER_ARMBIAN_BASE_IMAGE:-"debian:trixie"}"
 	declare -g DOCKER_ARMBIAN_TARGET_PATH="${DOCKER_ARMBIAN_TARGET_PATH:-"/armbian"}"
 
 	declare wanted_os_tag="${DOCKER_ARMBIAN_BASE_IMAGE%%:*}"
@@ -359,6 +356,9 @@ function docker_cli_prepare_dockerfile() {
 	declare host_arch
 	if [[ -n "${DOCKER_ARMBIAN_HOST_ARCH:-}" ]]; then
 		host_arch="${DOCKER_ARMBIAN_HOST_ARCH}"
+	elif [[ "${DOCKER_IS_PODMAN}" == "yes" ]]; then
+		host_arch="$(docker version --format '{{.OsArch}}')"
+		host_arch="${host_arch##*/}"
 	else
 		# Resolve the architecture where the Dockerfile will actually build.
 		# This also avoids relying on host tools such as dpkg, which may not
@@ -526,6 +526,11 @@ function docker_cli_prepare_launch() {
 		# Change the ccache directory to the named volume or bind created. @TODO: this needs more love. it works for Docker, but not sudo
 		"--env" "CCACHE_DIR=${DOCKER_ARMBIAN_TARGET_PATH}/cache/ccache"
 
+		# Forward CPUTHREADS (the build's `make -j` override) into the container.
+		# It is an env var, not a CLI arg, so without this passthrough the container
+		# never sees it and falls back to the default CPU-based thread count.
+		"--env" "CPUTHREADS=${CPUTHREADS-}"
+
 		# Pass down the TERM, COLORFGBG, and the COLUMNS. docker run has no --tty,
 		# so the container can't measure the terminal itself; forward the width
 		# captured on the host (ARMBIAN_TTY_COLUMNS) so patch tables match it.
@@ -536,6 +541,10 @@ function docker_cli_prepare_launch() {
 		# Pass down the CI env var (GitHub Actions, Jenkins, etc)
 		"--env" "CI=${CI}"                         # All CI's, hopefully
 		"--env" "GITHUB_ACTIONS=${GITHUB_ACTIONS}" # GHA
+		# The builtin Actions token, when the workflow exposes it. Raises the
+		# GitHub API budget from 60 requests/hour per IP to 1000/hour per repo,
+		# which is what the extensions resolving "latest release" depend on.
+		"--env" "GITHUB_TOKEN=${GITHUB_TOKEN:-}"
 		# All known valid Github Actions env vars
 		"--env" "GITHUB_ACTION=${GITHUB_ACTION}"
 		"--env" "GITHUB_ACTOR=${GITHUB_ACTOR}"
@@ -573,6 +582,10 @@ function docker_cli_prepare_launch() {
 		"--env" "NO_PROXY=${NO_PROXY:-${no_proxy:-}}"
 		"--env" "APT_PROXY_ADDR=${APT_PROXY_ADDR:-}"
 		"--env" "GITPROXY_ADDRESS=${GITPROXY_ADDRESS:-}"
+		"--env" "OCI_PROXY=${OCI_PROXY:-}"
+		"--env" "OCI_SERVER=${OCI_SERVER:-}"
+		"--env" "OCI_PATH=${OCI_PATH:-}"
+		"--env" "OCI_GIT_PATH=${OCI_GIT_PATH:-}"
 	)
 
 	# Pass in host DNS server so container can resolve hostnames on proxy
@@ -699,10 +712,14 @@ function docker_cli_prepare_launch() {
 	loop_over_armbian_mountpoints prepare_docker_args_for_mountpoint
 
 	# @TODO: auto-compute this list; just get the dirs and filter some out?
-	for MOUNT_DIR in "lib" "config" "extensions" "packages" "patch" "tools" "userpatches"; do
+	for MOUNT_DIR in "lib" "config" "extensions" "packages" "patch" "tools"; do
 		mkdir -p "${SRC}/${MOUNT_DIR}"
 		DOCKER_ARGS+=("--mount" "type=bind,source=${SRC}/${MOUNT_DIR},target=${DOCKER_ARMBIAN_TARGET_PATH}/${MOUNT_DIR}")
 	done
+
+	# userpatches: the host side is wherever USERPATCHES_PATH says; inside the container it always sits at the default location.
+	mkdir -p "${USERPATCHES_PATH}"
+	DOCKER_ARGS+=("--mount" "type=bind,source=${USERPATCHES_PATH},target=${DOCKER_ARMBIAN_TARGET_PATH}/userpatches")
 
 	if [[ "${DOCKER_SERVER_REQUIRES_LOOP_HACKS}" == "yes" ]]; then
 		display_alert "Adding /dev/loop* hacks for" "${DOCKER_ARMBIAN_HOST_OS_UNAME}" "debug"
@@ -767,7 +784,7 @@ function docker_cli_launch() {
 		run_host_command_logged find "${SRC}/config" -name ".DS_Store" -type f -delete "||" true
 		run_host_command_logged find "${SRC}/packages" -name ".DS_Store" -type f -delete "||" true
 		run_host_command_logged find "${SRC}/patch" -name ".DS_Store" -type f -delete "||" true
-		run_host_command_logged find "${SRC}/userpatches" -name ".DS_Store" -type f -delete "||" true
+		run_host_command_logged find "${USERPATCHES_PATH}" -name ".DS_Store" -type f -delete "||" true
 	fi
 
 	# This check is performed in order to set up the host so that it has a loop device, as calling losetup inside of

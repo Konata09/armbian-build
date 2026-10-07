@@ -16,10 +16,27 @@
 . /etc/armbian-release
 . /usr/lib/armbian/armbian-common
 
+# Cleanup gate: EXIT trap removes the marker only after FIRSTLOGIN_SUCCESS=1,
+# so power-loss or mid-run failure reruns firstlogin on next boot.
+FIRSTLOGIN_SUCCESS=0
+_firstlogin_cleanup() {
+	if [ "$FIRSTLOGIN_SUCCESS" = "1" ]; then
+		rm -f /root/.not_logged_in_yet
+		sync -f /root 2>/dev/null || sync
+	fi
+}
+trap _firstlogin_cleanup EXIT
+# DM takeover (gdm/lightdm) sends SIGHUP to the console's foreground process
+# while bash is mid-command. An untrapped SIGHUP kills bash mid-flight and its
+# EXIT trap gets cut short: builtins still run, but external commands (rm) do
+# not survive the dying shell. Handle the signal in normal execution context
+# instead — cleanup runs fully, then exit.
+trap '_firstlogin_cleanup; exit' HUP INT TERM
+
 check_abort() {
 
 	echo -e "\nDisabling user account creation procedure\n"
-	rm -f /root/.not_logged_in_yet
+	FIRSTLOGIN_SUCCESS=1
 	if [[ ${USER_SHELL} == zsh ]]; then
 		printf "\nYou selected \e[0;91mZSH\x1B[0m as your default shell. If you want to use it right away, please logout and login! \n\n"
 	fi
@@ -93,7 +110,10 @@ do_firstrun_automated_network_configuration()
 		source "$fp_config"
 
 		# Obtain backward configuration compatibility
-		PRESET_NET_STATIC_DNS=${PRESET_NET_STATIC_DNS// /,}
+		# DNS may be separated by spaces, commas or both ("8.8.8.8, 1.1.1.1", as
+		# Armbian Imager suggests); netplan needs a plain comma list, an empty
+		# element ("8.8.8.8,,1.1.1.1") is invalid YAML and breaks the network.
+		PRESET_NET_STATIC_DNS=$(tr -s ', ' ',' <<< "${PRESET_NET_STATIC_DNS}" | sed 's/^,//; s/,$//')
 		PRESET_NET_STATIC_MASK=$(mask2cidr $PRESET_NET_STATIC_MASK)
 
 		#-----------------------------------------------------------------------------
@@ -233,7 +253,7 @@ set_shell() {
 					echo "$i) $o"
 					((i++)) || true
 				done
-				if [ -z $PRESET_USER_SHELL ];then
+				if [[ -z $PRESET_USER_SHELL && $preset_unattended != 1 ]]; then
 					read -r reply
 				else
 					reply=1
@@ -304,7 +324,7 @@ set_timezone_and_locales() {
 			echo ""
 			unset response
 			while [[ ! "${response}" =~ ^(Y|y|N|n)$ ]]; do
-				if [ -z $PRESET_CONNECT_WIRELESS ];then
+				if [[ -z $PRESET_CONNECT_WIRELESS && $preset_unattended != 1 ]]; then
 					read -r -p "Connect via wireless? [Y/n] " response
 					response=${response:-Y}
 				else
@@ -462,13 +482,14 @@ set_timezone_and_locales() {
 
 	unset response
 	while [[ ! "${response}" =~ ^(Y|y|N|n)$ ]]; do
-		if [ -z "${SET_LANG_BASED_ON_LOCATION}" ] && [ -n "${TZDATA}" ];then
+		if [ -z "${SET_LANG_BASED_ON_LOCATION}" ] && [ -n "${TZDATA}" ] && [[ $preset_unattended != 1 ]]; then
 			echo -e "Detected timezone: \x1B[92m$TZDATA\x1B[0m"
 			echo ""
 			read -r -p "Set user language based on your location? [Y/n] " response
 			response=${response:-Y}
 		else
-			response=$SET_LANG_BASED_ON_LOCATION
+			# unattended without an answer: take the prompt's default (Y)
+			response=${SET_LANG_BASED_ON_LOCATION:-Y}
 			break
 		fi
 	done
@@ -485,8 +506,16 @@ set_timezone_and_locales() {
 	readarray -t options <<< "${LOCALES}"
 
 	if [ -z $PRESET_LOCALE ];then
-		# when having more locales, prompt for choosing one
-		if [[ "${#options[@]}" -gt 1 ]]; then
+		# when having more locales, prompt for choosing one (unattended: the first)
+		if [[ "${#options[@]}" -gt 1 && $preset_unattended == 1 ]]; then
+			# no country code: the search matched all locales, so keep the image locale
+			if [[ -n "${CCODE}" ]]; then
+				LOCALES=${options[0]}
+			else
+				LOCALES=$(sed -n 's/^LANG=//p' /etc/default/locale | tr -d '"')
+				LOCALES=${LOCALES:-C.UTF-8}
+			fi
+		elif [[ "${#options[@]}" -gt 1 ]]; then
 			options+=("Skip generating locales")
 			echo -e "\nAt your location, more locales are possible:\n"
 			PS3='Please enter your choice:'
@@ -504,8 +533,9 @@ set_timezone_and_locales() {
 	if [[ "${LOCALES}" != *Skip* ]]; then
 
 		if [ -z $PRESET_TIMEZONE ];then
-			# if TZDATA was not detected, we need to select one
-			if [[ -z ${TZDATA} ]]; then
+			# if TZDATA was not detected, we need to select one (unattended:
+			# keep the image's timezone rather than wait on tzselect)
+			if [[ -z ${TZDATA} && $preset_unattended != 1 ]]; then
 				TZDATA=$(tzselect | tail -1)
 			fi
 			echo ""
@@ -513,8 +543,10 @@ set_timezone_and_locales() {
 			TZDATA=$PRESET_TIMEZONE
 		fi
 
-		timedatectl set-timezone "${TZDATA}"
-		dpkg-reconfigure --frontend=noninteractive tzdata > /dev/null 2>&1
+		if [[ -n ${TZDATA} ]]; then
+			timedatectl set-timezone "${TZDATA}"
+			dpkg-reconfigure --frontend=noninteractive tzdata > /dev/null 2>&1
+		fi
 
 		# change default locales (atomic write)
 		local _f="/etc/default/locale"
@@ -600,12 +632,12 @@ add_user() {
 		else
 			username="$PRESET_USER_NAME"
 		fi
-		if ! grep '^[a-zA-Z][a-zA-Z0-9]*$' <<< "$username" > /dev/null; then
+		if ! grep '^[a-zA-Z][a-zA-Z0-9_-]*$' <<< "$username" > /dev/null; then
 			echo -e "\n\x1B[91mError\x1B[0m: illegal characters in username"
 			return
 		fi
 
-		RealUserName="$(echo "$username" | tr '[:upper:]' '[:lower:]' | tr -d -c '[:alnum:]')"
+		RealUserName="$(echo "$username" | tr '[:upper:]' '[:lower:]' | tr -d -c '[:alnum:]_-')"
 		[ -z "$RealUserName" ] && return
 		if ! id "$RealUserName" > /dev/null 2>&1; then
 			break
@@ -647,11 +679,12 @@ add_user() {
 					echo -e "\n\e[0;31mWarning:\x1B[0m Weak password, $okay \b!"
 				fi
 			fi
-			if [ -z "$PRESET_DEFAULT_REALNAME" ];then
+			if [[ -z "$PRESET_DEFAULT_REALNAME" && $preset_unattended != 1 ]]; then
 				echo -e ""
 				read -r -e -p "Please provide your real name: " -i "${RealUserName^}" RealName
 			else
-				RealName="$PRESET_DEFAULT_REALNAME"
+				# unattended without a real name: use the prompt's default
+				RealName="${PRESET_DEFAULT_REALNAME:-${RealUserName^}}"
 			fi
 
 			# Skip user creation if already exists (power-loss re-run). If the user
@@ -714,9 +747,8 @@ add_user() {
 			[ -z "$RealName" ] && RealName="$RealUserName"
 			echo -e "\nDear \e[0;92m${RealName}\x1B[0m, your account \e[0;92m${RealUserName}\x1B[0m has been created and is sudo enabled."
 			echo -e "Please use this account for your daily work from now on.\n"
-			# .not_logged_in_yet is NOT deleted here - moved to end of script
-			# to ensure all subsequent configuration (timezone, SSH, desktop)
-			# completes before marking firstlogin as done
+			# .not_logged_in_yet is NOT deleted here - the EXIT trap removes
+			# it once FIRSTLOGIN_SUCCESS=1 is set after all config completes.
 			# set up profile sync daemon on desktop systems
 			if command -v psd > /dev/null 2>&1; then
 				# Grant psd-overlay-helper NOPASSWD via a sudoers drop-in (atomic write).
@@ -772,6 +804,32 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 
 	. /root/.not_logged_in_yet
 
+	# most autologin consoles have nobody at them, so wait for Enter;
+	# a preset run has nobody to wait for, an ssh login already has a user
+	if [[ -z "${PRESET_ROOT_PASSWORD}${PRESET_USER_NAME}${PRESET_CONFIGURATION}${SSH_CONNECTION}" ]]; then
+		echo -e "\nPress Enter to start the first login setup on this console."
+		until read -r -t 1 _; do
+			(($? > 128)) || exit 0 # not a timeout: the terminal is gone
+			# done elsewhere: log out instead of leaving a root shell
+			[[ -f /root/.not_logged_in_yet ]] || { kill -HUP "$PPID"; exit 0; }
+		done
+	fi
+
+	exec 9<> /run/armbian-firstlogin.lock || exit 1
+	if ! flock -n 9; then
+		holder=$(< /run/armbian-firstlogin.lock)
+		echo -e "\nFirst login setup is already running on ${holder:-another console}.\n"
+		exit 0
+	fi
+	tty > /run/armbian-firstlogin.lock
+	# done elsewhere meanwhile: log a console out, keep an ssh shell
+	if [[ ! -f /root/.not_logged_in_yet ]]; then
+		[[ -z "${SSH_CONNECTION}" ]] && kill -HUP "$PPID"
+		exit 0
+	fi
+
+	. /root/.not_logged_in_yet
+
 	# override configuration from URL
 	if [[ -n "${PRESET_CONFIGURATION}" ]]; then
 		_f="/root/.not_logged_in_yet"
@@ -783,6 +841,13 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 			exit 1
 		fi
 	fi
+
+	# A preset (e.g. written by Armbian Imager) drives an unattended run: on a
+	# headless board the autologin console has nobody at it, so any question the
+	# preset doesn't answer would block first login forever. With one, questions
+	# the preset leaves open take their default instead of waiting for input.
+	preset_unattended=0
+	[[ -n "${PRESET_ROOT_PASSWORD}${PRESET_USER_NAME}" ]] && preset_unattended=1
 
 	do_firstrun_automated_network_configuration || exit 1
 
@@ -885,6 +950,9 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 
 	[[ -z "$PRESET_ROOT_PASSWORD" ]] && echo "" # empty line
 
+	# extra Enter presses would be read as an empty password
+	while read -r -t 0 _; do read -r _; done
+
 	trap '' 2
 	REPEATS=3
 	while [ -f "/root/.not_logged_in_yet" ]; do
@@ -909,18 +977,6 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 				fi
 			fi
 		fi
-
-		# Get current session identifiers
-		current_tty=$(tty | sed 's:/dev/::')  # e.g., "tty1"
-		current_pid=$$
-
-		# Kill ONLY other active root SHELL sessions (not login processes)
-		ps -u root -o pid,tty,comm |
-		  awk -v me="$current_tty" -v mypid="$current_pid" '
-		    NR>1 && $2 != "?" && $2 != me && $1 != mypid && $3 ~ /sh$/ {
-		      print $1
-		    }' |
-		  xargs --no-run-if-empty kill -9
 
 		# enable motd
 		chmod +x /etc/update-motd.d/*
@@ -954,7 +1010,7 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 		fi
 		[[ "$REPEATS" -eq 0 ]] && exit
 	done
-	trap - INT TERM EXIT
+	trap - INT
 
 	# display support status
 	if [ "$IMAGE_TYPE" != "nightly" ]; then
@@ -978,7 +1034,7 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 	# ask user to select shell
 	trap '' 2
 	set_shell || exit 1
-	trap - INT TERM EXIT
+	trap - INT
 
 	trap check_abort INT
 
@@ -991,16 +1047,32 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 			exit 1
 		fi
 	fi
-	trap - INT TERM EXIT
+	trap - INT
 
 	# ask user to select automated locales or not
 	trap '' 2
 	set_timezone_and_locales || exit 1
-	trap - INT TERM EXIT
+	trap - INT
 
 	if [[ ${USER_SHELL} == zsh ]]; then
 		printf "\nYou selected \e[0;91mZSH\x1B[0m as your default shell. If you want to use it right away, please logout and login! \n\n"
 	fi
+
+	# Heal host keys torn by power loss during firstrun's regeneration: the
+	# teardown (rm/truncate) can be durable while recreation is lost. -A skips
+	# files that exist, so drop empties first; it is a no-op on intact keys.
+	for _k in /etc/ssh/ssh_host_*_key; do
+		[[ -e "$_k" && ! -s "$_k" ]] || continue
+		if rm -f "$_k" "$_k.pub"; then
+			EMPTY_KEYS=1
+		else
+			echo "WARNING: failed to remove empty host key ${_k}" >&2
+		fi
+	done
+	if [[ -n "${EMPTY_KEYS:-}" ]]; then
+		echo -e "\nRegenerating SSH host keys lost to power failure..."
+	fi
+	ssh-keygen -A > /dev/null 2>&1 && sync
 
 	# re-enable passing locale environment via ssh (atomic write)
 	_f="/etc/ssh/sshd_config"
@@ -1010,9 +1082,14 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 		rm -f "${_f}.tmp"
 		exit 1
 	fi
-	# Reload keeps the active SSH session alive, so the marker can remain until
-	# every remaining firstlogin action completes.
-	systemctl reload ssh.service || exit 1
+	# Restart ssh.service; on failure preserve /root/.not_logged_in_yet so
+	# firstlogin reruns for recovery. Unlike reload, restart succeeds on an
+	# inactive unit, so this does not loop on a fresh image.
+	systemctl restart ssh.service || exit 1
+	# All critical configuration is complete. The EXIT trap may now safely
+	# remove the marker; subsequent failures (DM startup, etc.) should not
+	# force a full firstlogin rerun.
+	FIRSTLOGIN_SUCCESS=1
 
 	# rpardini: hacks per-dm, very much legacy stuff that works by a miracle
 	if [[ "${desktop_dm}" == "lightdm" ]] && [ -n "$RealName" ]; then
@@ -1070,9 +1147,21 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 		[[ -x $(command -v sway) ]] && sed -i "s/user-session.*/user-session=sway/" /etc/lightdm/lightdm.conf.d/11-armbian.conf
 		[[ -x $(command -v sway) ]] && sed -i "s/user-session.*/user-session=sway/" /etc/lightdm/lightdm.conf.d/22-armbian-autologin.conf
 
-		# select xmonad session
-		[[ -x $(command -v xmonad) ]] && sed -i "s/user-session.*/user-session=xmonad/" /etc/lightdm/lightdm.conf.d/11-armbian.conf
-		[[ -x $(command -v xmonad) ]] && sed -i "s/user-session.*/user-session=xmonad/" /etc/lightdm/lightdm.conf.d/22-armbian-autologin.conf
+		# select xmonad session. The xmonad package ships two of them:
+		# xmonad.desktop runs the window manager bare, while
+		# gnome-flashback-xmonad.desktop runs it inside a GNOME Flashback
+		# session and so gets a session dbus, a polkit agent and session
+		# management. Prefer the latter when it can actually start -- its
+		# TryExec is gnome-flashback, which comes from gnome-session-flashback
+		# and is not always installed -- and fall back to the bare session.
+		if [[ -x $(command -v xmonad) ]]; then
+			xmonad_session="xmonad"
+			if [[ -f /usr/share/xsessions/gnome-flashback-xmonad.desktop && -x $(command -v gnome-flashback) ]]; then
+				xmonad_session="gnome-flashback-xmonad"
+			fi
+			sed -i "s/user-session.*/user-session=${xmonad_session}/" /etc/lightdm/lightdm.conf.d/11-armbian.conf
+			sed -i "s/user-session.*/user-session=${xmonad_session}/" /etc/lightdm/lightdm.conf.d/22-armbian-autologin.conf
+		fi
 
 		ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service
 
@@ -1083,7 +1172,7 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 		else
 			echo -e "\n\e[1m\e[39mNow starting desktop environment...\x1B[0m\n"
 			sleep 1
-			service lightdm start 2> /dev/null
+			systemctl --no-block start lightdm 2>/dev/null
 			if [ -f /root/.desktop_autologin ]; then
 				rm /root/.desktop_autologin
 			else
@@ -1112,7 +1201,7 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 		else
 			echo -e "\n\e[1m\e[39mNow starting desktop environment...\x1B[0m\n"
 			sleep 1
-			service gdm3 start 2> /dev/null
+			systemctl --no-block start gdm3 2>/dev/null
 			if [ -f /root/.desktop_autologin ]; then
 				rm /root/.desktop_autologin
 			else
@@ -1144,7 +1233,8 @@ if [[ -f /root/.not_logged_in_yet ]] && tty -s; then
 			User=$RealUserName
 		EOF
 		echo -e "\n\e[1m\e[39mNow starting desktop environment via ${desktop_dm}...\x1B[0m\n"
-		systemctl enable --now sddm 2> /dev/null
+		systemctl enable sddm 2>/dev/null
+		systemctl --no-block start sddm 2>/dev/null
 
 		if [ -f /root/.desktop_autologin ]; then
 				rm /root/.desktop_autologin
@@ -1174,10 +1264,4 @@ if [[ -f /root/provisioning.sh ]]; then
 	. /root/provisioning.sh
 fi
 
-# All configuration complete - safe to remove firstlogin marker now
-# This must be the last operation to ensure power-loss during any
-# step above will cause firstlogin to re-run on next boot.
-if tty -s; then
-	rm -f /root/.not_logged_in_yet
-	sync -f /root 2>/dev/null || sync
-fi
+# Marker cleanup is handled by _firstlogin_cleanup EXIT trap.

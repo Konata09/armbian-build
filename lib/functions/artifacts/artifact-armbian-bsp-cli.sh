@@ -74,6 +74,7 @@ function artifact_armbian-bsp-cli_prepare_version() {
 
 	declare -a dirs_to_hash=(
 		"${SRC}/packages/bsp/common" # common stuff
+		"${SRC}/packages/bsp/${BOARD}" # board-specific stuff
 		"${SRC}/config/optional/_any_board/_packages/bsp-cli"
 		"${SRC}/config/optional/architectures/${ARCH}/_packages/bsp-cli"
 		"${SRC}/config/optional/families/${LINUXFAMILY}/_packages/bsp-cli"
@@ -147,7 +148,7 @@ function artifact_armbian-bsp-cli_cli_adapter_config_prep() {
 }
 
 function artifact_armbian-bsp-cli_get_default_oci_target() {
-	artifact_oci_target_base="${GHCR_SOURCE}/armbian/os/"
+	artifact_oci_target_base="${OCI_SERVER}/${OCI_PATH}/"
 }
 
 function artifact_armbian-bsp-cli_is_available_in_local_cache() {

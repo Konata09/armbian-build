@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# @description Bakes cumulative kernel debug information into headless boards so serial-console facilities (Magic SysRq, KGDB, pstore) print meaningful symbols instead of raw hex. `KERNEL_DEBUG_TIER` (0-3, default 1) layers printk/lockup detection, then pstore/ramoops and full kallsyms, then KGDB/KDB over serial. Requires `DEBUG_INFO_BTF`, so `KERNEL_BTF=no` is a hard error.
+
 #
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (c) 2026 Igor Velkov
@@ -20,11 +22,15 @@
 #   0  no-op (extension stays loaded, kernel side disabled — keeps the
 #      extension declarable in a shared config without forcing the cost on
 #      every board, e.g. when one board needs BTF=no for RAM reasons)
-#   1  printk timestamps + lockup/hung-task detection + stack guards
+#   1  printk timestamps + soft/hard lockup and hung-task detection + stack guards
 #      Cost: a handful of bytes per printk, a few cycles per scheduler tick.
-#      No board prerequisites. Default tier.
-#   2  + pstore/ramoops (persistent dmesg through reboot)
-#      Cost: same as tier 1 plus a reserved memory region. Without a DT
+#      No board prerequisites. Default tier. Hard lockups need kernel 6.5+.
+#      On arm64 with GICv3 and kernel 6.7+, `irqchip.gicv3_pseudo_nmi=1` in
+#      bootargs adds the stuck CPU's backtrace.
+#   2  + pstore/ramoops (persistent dmesg through reboot) + /proc/kcore and
+#      full kallsyms for kexec/kdump, crash and drgn
+#      Cost: same as tier 1 plus a reserved memory region and a larger
+#      kallsyms table (about 1-2 MB). Without a DT
 #      `/reserved-memory/ramoops` node or `ramoops.mem_address=…` bootargs,
 #      the modules load but have nowhere to write — silent no-op.
 #   3  + KGDB / KDB over serial
@@ -84,8 +90,12 @@ function custom_kernel_config__kernel_debug_tier1() {
 	if [[ "${KERNEL_DEBUG_TIER:-1}" -lt 1 ]]; then
 		return 0
 	fi
-	display_alert "${EXTENSION}: tier 1" "printk timestamps + lockup/hung-task detection" "info"
+	# DEBUG_KERNEL is only a menu gate, but the lockup/hung-task detectors,
+	# SCHED_STACK_END_CHECK and KALLSYMS_ALL all depend on it. Most family
+	# configs get it selected via EXPERT=y; the few that don't (e.g.
+	# mvebu-legacy) would otherwise have every option below silently dropped.
 	opts_y+=(
+		"DEBUG_KERNEL"
 		"PRINTK_TIME"
 		"PRINTK_CALLER"
 		"DETECT_HUNG_TASK"
@@ -94,6 +104,18 @@ function custom_kernel_config__kernel_debug_tier1() {
 	)
 	# Default is 120s upstream; explicit so the value shows up in .config.
 	opts_val["DEFAULT_HUNG_TASK_TIMEOUT"]="120"
+	# Before 6.5 arm64 has no hard-lockup backend and olddefconfig drops the option.
+	declare lockups="soft lockup"
+	if linux-version compare "${KERNEL_MAJOR_MINOR}" ge 6.5; then
+		lockups="soft/hard lockup"
+		opts_y+=("HARDLOCKUP_DETECTOR")
+		# On arm64 the perf detector fires only with pseudo-NMI active; prefer the buddy detector.
+		# The stuck CPU's backtrace still needs an NMI: GICv3, irqchip.gicv3_pseudo_nmi=1, 6.7+.
+		if [[ "${ARCH}" == "arm64" ]]; then
+			opts_y+=("HARDLOCKUP_DETECTOR_PREFER_BUDDY" "ARM64_PSEUDO_NMI")
+		fi
+	fi
+	display_alert "${EXTENSION}: tier 1" "printk timestamps + ${lockups} and hung-task detection" "info"
 }
 
 # Tier 2: pstore/ramoops — kernel writes its last printk before crash to a
@@ -108,6 +130,14 @@ function custom_kernel_config__kernel_debug_tier2_pstore() {
 	fi
 	display_alert "${EXTENSION}: tier 2 (pstore/ramoops)" "needs DT or bootarg reservation, otherwise no-op" "info"
 	opts_y+=("PSTORE" "PSTORE_CONSOLE" "PSTORE_RAM" "PSTORE_DEFLATE_COMPRESS")
+	# Post-mortem tooling: kexec-tools loads the crash kernel using the
+	# VMCOREINFO note in /proc/kcore (PHYS_OFFSET, VA_BITS) and the _text
+	# symbol from /proc/kallsyms (page_offset). Without PROC_KCORE it falls
+	# back to /proc/iomem; without KALLSYMS_ALL arm64 kallsyms only covers
+	# [_stext,_etext] and _text is missing, so the vmcore ELF header is
+	# built with page_offset=0. crash/drgn on a live kernel need /proc/kcore
+	# and full symbol coverage as well.
+	opts_y+=("PROC_KCORE" "KALLSYMS_ALL")
 }
 
 # Tier 3: KGDB/KDB over the serial console. SysRq+g drops into the KDB shell

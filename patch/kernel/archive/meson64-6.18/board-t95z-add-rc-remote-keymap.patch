@@ -34,7 +34,7 @@ diff --git a/Documentation/devicetree/bindings/vendor-prefixes.yaml b/Documentat
 index 111111111111..222222222222 100644
 --- a/Documentation/devicetree/bindings/vendor-prefixes.yaml
 +++ b/Documentation/devicetree/bindings/vendor-prefixes.yaml
-@@ -1560,6 +1560,8 @@ patternProperties:
+@@ -1562,6 +1562,8 @@ patternProperties:
      description: Sundance DSP Inc.
    "^sunplus,.*":
      description: Sunplus Technology Co., Ltd.
@@ -140,7 +140,7 @@ diff --git a/include/media/rc-map.h b/include/media/rc-map.h
 index 111111111111..222222222222 100644
 --- a/include/media/rc-map.h
 +++ b/include/media/rc-map.h
-@@ -316,6 +316,7 @@ struct rc_map *rc_map_get(const char *name);
+@@ -314,6 +314,7 @@ struct rc_map *rc_map_get(const char *name);
  #define RC_MAP_SIEMENS_GIGASET_RC20      "rc-siemens-gigaset-rc20"
  #define RC_MAP_SNAPSTREAM_FIREFLY        "rc-snapstream-firefly"
  #define RC_MAP_STREAMZAP                 "rc-streamzap"

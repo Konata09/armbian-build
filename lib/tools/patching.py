@@ -94,15 +94,16 @@ for patch_dir_to_apply in PATCH_DIRS_TO_APPLY:
 
 # Some sub-path possibilities:
 CONST_PATCH_SUB_DIRS = []
-if TARGET is not None:
-	CONST_PATCH_SUB_DIRS.append(patching_utils.PatchSubDir(f"target_{TARGET}", "target"))
+CONST_PATCH_SUB_DIRS.append(patching_utils.PatchSubDir("", "common"))
 if BOARD is not None:
 	CONST_PATCH_SUB_DIRS.append(patching_utils.PatchSubDir(f"board_{BOARD}", "board"))
-CONST_PATCH_SUB_DIRS.append(patching_utils.PatchSubDir("", "common"))
+if TARGET is not None:
+	CONST_PATCH_SUB_DIRS.append(patching_utils.PatchSubDir(f"target_{TARGET}", "target"))
 
-# Prepare the full list of patch directories to apply
+# Prepare the full list of patch directories to apply, lowest priority first:
+# a same-named patch file in a later directory replaces the one found earlier.
 ALL_DIRS: list[patching_utils.PatchDir] = []
-for patch_root_dir in CONST_PATCH_ROOT_DIRS:
+for patch_root_dir in sorted(CONST_PATCH_ROOT_DIRS, key=lambda root: root.root_type == "user"):
 	for patch_sub_dir in CONST_PATCH_SUB_DIRS:
 		ALL_DIRS.append(patching_utils.PatchDir(patch_root_dir, patch_sub_dir, SRC))
 
@@ -151,8 +152,8 @@ for patch_file in EXTRA_PATCH_FILES_FIRST:
 log.debug(f"Found {len(PATCH_FILES_FIRST)} kernel driver patches.")
 
 SERIES_PATCH_FILES: list[patching_utils.PatchFileInDir] = []
-# Now, loop over ALL_DIRS, and find the patch files in each directory
-for one_dir in ALL_DIRS:
+# Find the patch files in each directory; series apply in CONST_PATCH_ROOT_DIRS order.
+for one_dir in sorted(ALL_DIRS, key=lambda d: CONST_PATCH_ROOT_DIRS.index(d.patch_root_dir)):
 	if one_dir.patch_sub_dir.sub_type == "common":
 		# Handle series; those are directly added to SERIES_PATCH_FILES which is not sorted.
 		series_patches = one_dir.find_series_patch_files()
@@ -178,6 +179,13 @@ for one_patch_file in ALL_DIR_PATCH_FILES:
 # For series-based patches, we want to apply the serie'd patches first.
 # The other patches are separately sorted.
 NORMAL_PATCH_FILES = list(dict(sorted(ALL_DIR_PATCH_FILES_BY_NAME.items())).values())
+
+# An empty patch file disables the same-named patch from a lower priority directory.
+for one_patch_file in NORMAL_PATCH_FILES:
+	if os.path.getsize(one_patch_file.full_file_path()) == 0:
+		log.info(f"Skipping empty patch file '{one_patch_file.relative_to_src_filepath()}'")
+NORMAL_PATCH_FILES = [f for f in NORMAL_PATCH_FILES if os.path.getsize(f.full_file_path()) > 0]
+
 ALL_PATCH_FILES_SORTED = PATCH_FILES_FIRST + SERIES_PATCH_FILES + NORMAL_PATCH_FILES
 
 patch_counter_desc_arr = []
@@ -568,7 +576,6 @@ if apply_patches_to_git and readme_markdown is not None and git_repo is not None
 # Use Rich.
 from rich.console import Console
 from rich.table import Table
-from rich.syntax import Syntax
 
 CONSOLE_FALLBACK_WIDTH = 160   # no terminal to measure (CI logs, piped output)
 CONSOLE_WIDTH_MARGIN = 12      # columns reserved for table borders and cell padding
@@ -616,26 +623,26 @@ if True:
 # Use Rich to print a summary of the failed patches and their rejects
 if any_failed_to_apply:
 	summary_table = Table(title="Summary of failed patches", show_header=True, show_lines=True, box=rich.box.ROUNDED)
+	# Small minima so the three columns still fit (and fold) down to
+	# CONSOLE_MIN_WIDTH; with min_width=20 on the output column rich crops the
+	# Rejects column on terminals narrower than ~75 columns instead of folding.
 	summary_table.add_column("Patch", overflow="fold", min_width=5, max_width=20)
-	summary_table.add_column("Patching output", overflow="fold", min_width=20, max_width=40)
-	summary_table.add_column("Rejects")
+	summary_table.add_column("Patching output", overflow="fold", min_width=10, max_width=40)
+	# Rejects are full of long unbroken tokens (paths, dts identifiers); folding
+	# keeps every character on screen at any terminal width, where word-wrapping
+	# would elide them with an ellipsis.
+	summary_table.add_column("Rejects", overflow="fold")
 	for one_patch in failed_to_apply_list:
 		reject_compo = "No rejects"
 		if one_patch.rejects is not None:
-			reject_compo = Syntax(one_patch.rejects, "diff", line_numbers=False, word_wrap=True)
+			reject_compo = one_patch.rich_rejects()
 
 		summary_table.add_row(
 			one_patch.rich_name_status(),
 			one_patch.rich_patch_output(),
 			reject_compo
 		)
-	# Reject diagnostics need room regardless of the reader's terminal: rich's
-	# Syntax word-wrap elides long unbroken diff lines with an ellipsis when the
-	# column is narrow. Give this table at least the fallback width (so a narrow
-	# terminal still gets room), but the full adaptive width when it is wider, so
-	# a wide terminal keeps every reject line it could show before.
-	console_failed = Console(color_system="standard", width=max(console_width, CONSOLE_FALLBACK_WIDTH), highlight=False)
-	console_failed.print(summary_table)
+	console.print(summary_table)
 
 if exit_with_exception is not None:
 	raise exit_with_exception

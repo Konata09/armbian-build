@@ -18,6 +18,7 @@ function kernel_prepare_git() {
 	display_alert "Downloading sources" "kernel" "git"
 
 	GIT_FIXED_WORKDIR="${LINUXSOURCEDIR}" \
+		GIT_EXPECTED_SHA1="${KERNEL_GIT_SHA1:-}" \
 		GIT_BARE_REPO_FOR_WORKTREE="${kernel_git_bare_tree}" \
 		GIT_BARE_REPO_INITIAL_BRANCH="master" \
 		fetch_from_repo "${KERNELSOURCE}" "kernel:${KERNEL_MAJOR_MINOR}" "${KERNELBRANCH}" "yes"
@@ -27,10 +28,5 @@ function kernel_prepare_git() {
 function kernel_cleanup_bundle_artifacts() {
 	[[ -z "${git_bundles_dir}" ]] && exit_with_error "git_bundles_dir is not set"
 
-	if [[ -d "${git_bundles_dir}" ]]; then
-		display_alert "Cleaning up Kernel git bundle artifacts" "no longer needed" "info"
-		run_host_command_logged rm -rf "${git_bundles_dir}"
-	fi
-
-	return 0
+	git_oras_tree_cleanup_bundles "Kernel" "${git_bundles_dir}"
 }
