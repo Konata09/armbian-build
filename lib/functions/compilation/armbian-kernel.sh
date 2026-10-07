@@ -67,7 +67,7 @@ function armbian_kernel_config__netkit() {
 function armbian_kernel_config__disable_various_options() {
 	display_alert "Enable EXPERT=y" "armbian-kernel" "debug"
 	opts_y+=("EXPERT") # Too many config options are hidden behind EXPERT=y, lets have it always on
-	display_alert "Disabling module signing / debug / auto version" "armbian-kernel" "debug"
+	display_alert "Disabling module signing / auto versioning" "armbian-kernel" "debug"
 	opts_n+=("SECURITY_LOCKDOWN_LSM") # Disables Linux Security Module lockdown mode
 	opts_n+=("MODULE_SIG")            # No use signing modules
 	opts_n+=("MODULE_SIG_ALL")        # No use auto-signing modules
@@ -76,6 +76,12 @@ function armbian_kernel_config__disable_various_options() {
 	# DONE: Disable: version shenanigans
 	opts_n+=("LOCALVERSION_AUTO") # This causes a mismatch between what Armbian wants and what make produces.
 	opts_val["LOCALVERSION"]='""' # Must be empty; make is later invoked with LOCALVERSION and it adds up
+}
+
+# Disable DMABUF_DEBUG, which is enabled by default by DEBUG_KERNEL (which is enabled by EXPERT) since v7.3-rc4.
+# It breaks video rendering on rockchip and msm, at least.
+function armbian_kernel_config__disable_dmabuf_debug() {
+	opts_n+=("DMABUF_DEBUG")
 }
 
 # Forces 48-bit virtual and physical addressing on ARM64 architectures.
@@ -250,7 +256,6 @@ function armbian_kernel_config__select_nftables() {
 	opts_y+=("NETFILTER_NETLINK_GLUE_CT")       # Netfilter netlink glue for conntrack
 	opts_m+=("NETFILTER_NETLINK_HOOK")          # Netfilter base hook dump support
 	opts_m+=("NETFILTER_NETLINK_LOG")           # Netfilter LOG over NFNETLINK interface
-	opts_m+=("NETFILTER_NETLINK")               # Netfilter netlink interface
 	opts_m+=("NETFILTER_NETLINK_OSF")           # Netfilter OSF over NFNETLINK interface
 	opts_m+=("NETFILTER_NETLINK_QUEUE")         # Netfilter NFQUEUE over NFNETLINK interface
 	opts_m+=("NETFILTER_SYNPROXY")              # TCP SYN proxy support
@@ -410,6 +415,49 @@ function armbian_kernel_config__select_nftables() {
 	opts_m+=("IP_SET_BITMAP_PORT")    # IP set bitmap:port type
 }
 
+# Enables the IP tunnel and encapsulation drivers for every kernel we build.
+#
+# Armbian boards are routinely used as routers and VPN endpoints, and the tunnel
+# drivers are what that needs. They were never decided fleet-wide, so the shipped
+# configs drifted: across the 122 of them the IPv4 half is nearly universal
+# (NET_IPIP 85, NET_IPGRE 78) while the IPv6 half is patchy (IPV6_GRE 62,
+# IPV6_SIT 54) and IPV6_TUNNEL is enabled in only 24 -- with 8 configs setting it
+# to "not set" outright. Whether a given board can terminate a tunnel came down
+# to which family config it happened to be built from.
+#
+# The IPv6 side is the one that bites. DS-Lite (RFC 6333) terminates an
+# IPv4-in-IPv6 tunnel on the customer router and needs ip6_tnl; it is the
+# standard deployment on a large share of European fibre and cable lines, where
+# the carrier hands out CGNAT-only IPv4 that is not routed. Without it a board
+# used as a router there has working IPv6 and no IPv4 at all.
+#
+# All modules, so nothing is paid for until a tunnel is actually created. The two
+# built-ins are bool options extending a driver, not separate modules. Kernels
+# whose dependencies are unmet drop them at olddefconfig, so families without
+# IPv6 are unaffected. Note this also normalises the handful of configs that
+# built one of these in (=y) down to a module.
+#
+# Deliberately not here: NET_FOU (foo-over-UDP) is genuinely niche, and WIREGUARD
+# is a VPN rather than a tunnel driver -- and is already in 101 of 122 configs.
+function armbian_kernel_config__select_tunnels() {
+	# IPv4 tunnelling
+	opts_m+=("NET_IPIP")            # IP-in-IP tunnelling (ipip)
+	opts_m+=("NET_IPGRE_DEMUX")     # GRE demultiplexer, required by the GRE drivers
+	opts_m+=("NET_IPGRE")           # GRE tunnels over IPv4 (ip_gre)
+	opts_y+=("NET_IPGRE_BROADCAST") # bool: broadcast/multicast GRE
+
+	# IPv6 tunnelling
+	opts_m+=("IPV6_SIT")     # 6in4 / 6to4 tunnels (sit) -- HE tunnelbroker et al
+	opts_y+=("IPV6_SIT_6RD") # bool: 6RD extension to sit
+	opts_m+=("IPV6_TUNNEL")  # IP-in-IPv6 tunnel, RFC2473 (ip6_tnl) -- DS-Lite
+	opts_m+=("IPV6_GRE")     # GRE tunnels over IPv6 (ip6_gre)
+	opts_m+=("IPV6_VTI")     # virtual tunnel interface for IPsec over IPv6
+
+	# Overlay encapsulation. VXLAN is already forced by the Docker hook; GENEVE is
+	# its counterpart and was in only 68 configs, so pair them up.
+	opts_m+=("GENEVE") # Generic Network Virtualization Encapsulation
+}
+
 # Enables netfilter legacy xtables and ebtables support for kernels 6.18+.
 #
 # Linux 6.18 removed legacy xtables (iptables-legacy) support by default in favor
@@ -466,6 +514,21 @@ function armbian_kernel_config__enable_various_filesystems() {
 	opts_y+=("F2FS_FS_XATTR")      # Extended attributes for f2fs (F2FS_FS_SECURITY depends on it)
 	opts_y+=("F2FS_FS_SECURITY")   # Enables security extensions for f2fs
 	opts_m+=("EROFS_FS")           # Enhanced Read-Only FS (useful for Docker images)
+}
+
+# Enables SMB/CIFS file sharing as modules: the client and the ksmbd server.
+function armbian_kernel_config__enable_smb_cifs() {
+	opts_y+=("NETWORK_FILESYSTEMS") # Parent menu, off in some minimal configs
+	opts_m+=("CIFS")                # SMB client (mount -t cifs)
+	opts_y+=("CIFS_XATTR")          # Extended attributes
+	opts_y+=("CIFS_POSIX")          # POSIX extensions
+	opts_y+=("CIFS_UPCALL")         # Kerberos through cifs.upcall
+	opts_y+=("CIFS_DFS_UPCALL")     # DFS referrals
+
+	# ksmbd does not exist before kernel 5.15.
+	if linux-version compare "${KERNEL_MAJOR_MINOR}" ge 5.15; then
+		opts_m+=("SMB_SERVER") # ksmbd, in-kernel SMB3 server
+	fi
 }
 
 # Enables Docker support by configuring a comprehensive set of kernel options required for Docker functionality.
@@ -617,6 +680,26 @@ function armbian_kernel_config__enable_ntsync() {
 #
 # All changes are logged via display_alert for debugging purposes.
 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+# Forces kernel options to "n", also over an Armbian default from armbian_kernel_config.
+# Use it in a custom_kernel_config hook. A plain opts_n entry loses: opts_y and opts_m apply later.
+# Parameters:
+#   $@ - options: kernel option names without the CONFIG_ prefix
+function kernel_config_force_n() {
+	declare opt keep o
+	declare -a filtered
+	for opt in "$@"; do
+		for keep in opts_y opts_m; do
+			declare -n arr="${keep}"
+			filtered=()
+			for o in "${arr[@]}"; do [[ "${o}" == "${opt}" ]] || filtered+=("${o}"); done
+			arr=("${filtered[@]}")
+			unset -n arr
+		done
+		unset 'opts_val[$opt]'
+		opts_n+=("${opt}")
+	done
+}
 
 # Sets a kernel configuration option to build as a loadable module (=m).
 # Parameters:

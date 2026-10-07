@@ -32,13 +32,13 @@ case $BRANCH in
 		;;
 
 	edge)
-		declare -g KERNEL_MAJOR_MINOR="7.1"
+		declare -g KERNEL_MAJOR_MINOR="7.3"
 		declare -g LINUXFAMILY=rockchip64
 		declare -g LINUXCONFIG='linux-rockchip64-'$BRANCH
 		;;
 
 	bleedingedge)
-		declare -g KERNEL_MAJOR_MINOR="7.2"
+		declare -g KERNEL_MAJOR_MINOR="7.4"
 		declare -g LINUXFAMILY=rockchip64
 		declare -g LINUXCONFIG='linux-rockchip64-'$BRANCH
 		;;
@@ -70,7 +70,7 @@ esac
 # - binman-atf-mainline:  u-boot builds full boot image with mainline ATF from information in device tree.  See: https://docs.u-boot.org/en/latest/develop/package/binman.html
 
 #BOOT_SOC=`expr $BOOTCONFIG : '.*\(rk[[:digit:]]\+.*\)_.*'`
-BOOT_SOC=${BOOT_SOC:=$(expr $BOOTCONFIG : '.*\(rk[[:digit:]]\+.*\)_.*' || true)}
+BOOT_SOC=${BOOT_SOC:=$(expr "${BOOTCONFIG}" : '.*\(rk[[:digit:]]\+.*\)_.*' || true)}
 
 if [[ "a${BOOT_SOC}a" == "aa" ]]; then
 	if [[ "${BOOTCONFIG}" != "" && "${BOOTCONFIG}" != " none" ]]; then # only warn if BOOTCONFIG set and not 'none'
@@ -129,6 +129,15 @@ case "$BOOT_SOC" in
 		DDR_BLOB="${DDR_BLOB:-"rk35/rk3528_ddr_1056MHz_v1.09.bin"}"
 		BL31_BLOB="${BL31_BLOB:-"rk35/rk3528_bl31_v1.17.elf"}"
 		ROCKUSB_BLOB="rk35/rk3528_spl_loader_v1.07.104.bin"
+		;;
+
+	rk3562)
+		CPUMAX=${CPUMAX:="2000000"}
+		BOOT_SCENARIO="${BOOT_SCENARIO:=spl-blobs}"
+		DDR_BLOB="${DDR_BLOB:-"rk35/rk3562_ddr_1056MHz_v1.07.bin"}"
+		BL31_BLOB="${BL31_BLOB:-"rk35/rk3562_bl31_v1.21.elf"}"
+		BOOT_SOC_MKIMAGE="rk3562"
+		BOOTENV_FILE='rk35xx.txt'
 		;;
 
 	rk3566)
@@ -451,7 +460,7 @@ family_tweaks() {
 
 family_tweaks_bsp() {
 
-	if [[ $BOOTCONFIG == *3328* ]] && [[ $BRANCH != legacy ]]; then
+	if [[ $BOOTCONFIG == *3328* ]]; then
 		mkdir -p "$destination"/etc/X11/xorg.conf.d
 		cat <<- EOF > "$destination"/etc/X11/xorg.conf.d/02-driver.conf
 			# set fbdev as default driver.
@@ -482,14 +491,14 @@ function post_family_config__900_late_default_serial_console_by_branch() {
 	fi
 
 	case $BRANCH in
-		legacy | vendor)
+		vendor)
 			display_alert "rockchip64_common: defaulting SERIALCON" "Setting SERIALCON to ttyFIQ0 for BRANCH='${BRANCH}'" "info"
 			SERIALCON="ttyFIQ0"
 			;;
 		*)
 			# Different Rockchip SoCs use different UART for debug console
 			case $BOOT_SOC in
-				rk3576)
+				rk3576 | rk3562)
 					display_alert "rockchip64_common: defaulting SERIALCON" "Setting SERIALCON to ttyS0 for SoC='${BOOT_SOC}' BRANCH='${BRANCH}'" "info"
 					SERIALCON="ttyS0"
 					;;

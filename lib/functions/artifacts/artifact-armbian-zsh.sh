@@ -17,7 +17,7 @@ function artifact_armbian-zsh_prepare_version() {
 	artifact_version_reason="undetermined" # outer scope
 
 	declare -g ARMBIAN_ZSH_SOURCE="${ARMBIAN_ZSH_SOURCE:-"https://github.com/ohmyzsh/ohmyzsh"}"
-	declare -g ARMBIAN_ZSH_BRANCH="commit:bfeeda1491b5366aa5798a86cf6f3621536b171c" # 2023-05-21, update this once in a while
+	declare -g ARMBIAN_ZSH_BRANCH="commit:4b657407c98bbc8830ae66c2ac7ff3d737c55a83" # 2026-08-29, update this once in a while
 
 	debug_var ARMBIAN_ZSH_SOURCE
 	debug_var ARMBIAN_ZSH_BRANCH
@@ -77,7 +77,7 @@ function artifact_armbian-zsh_cli_adapter_config_prep() {
 }
 
 function artifact_armbian-zsh_get_default_oci_target() {
-	artifact_oci_target_base="${GHCR_SOURCE}/armbian/os/"
+	artifact_oci_target_base="${OCI_SERVER}/${OCI_PATH}/"
 }
 
 function artifact_armbian-zsh_is_available_in_local_cache() {

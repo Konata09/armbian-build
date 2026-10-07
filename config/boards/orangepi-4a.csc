@@ -1,4 +1,4 @@
-# Allwinner Cortex-A55 octa-core 2/4GB SoC
+# Allwinner T527 octa core 2/4GB RAM eMMC NVMe GBE WiFi/BT HDMI 4x USB2
 BOARD_NAME="Orange Pi 4A"
 BOARD_VENDOR="xunlong"
 BOARDFAMILY="sun55iw3"
@@ -9,8 +9,7 @@ OVERLAY_PREFIX="sun55i-t527"
 #BOOT_LOGO="desktop"
 KERNEL_TARGET="edge"
 BOOT_FDT_FILE="sun55i-t527-orangepi-4a.dtb"
-IMAGE_PARTITION_TABLE="gpt"
-#IMAGE_PARTITION_TABLE="msdos"
+IMAGE_PARTITION_TABLE="msdos"
 BOOTFS_TYPE="fat"
 BOOTSTART="1"
 BOOTSIZE="512"

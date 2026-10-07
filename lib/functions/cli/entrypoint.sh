@@ -45,8 +45,20 @@ function cli_entrypoint() {
 	apply_cmdline_params_to_env "early" # which uses ARMBIAN_PARSED_CMDLINE_PARAMS
 	# From here on, no more ${1} or stuff. We've parsed it all into ARMBIAN_PARSED_CMDLINE_PARAMS or ARMBIAN_NON_PARAM_ARGS and ARMBIAN_COMMAND.
 
+	# Normalize renamed switches now, while the command line is all we have.
+	# The pre_run loop and the PREFER_DOCKER / DOCKER_NICE checks below read
+	# ARMBIAN_PARSED_CMDLINE_PARAMS directly, so an alias that only reached the
+	# environment would be invisible to them. Config files are handled by the
+	# second pass further down, once they have been sourced.
+	apply_deprecated_switch_aliases
+
 	# Re-initialize logging, to take into account the new environment after parsing cmdline params.
 	logging_init
+
+	# USERPATCHES_PATH is the userpatches dir. read-only. This is the single definition; everything else uses the variable.
+	# Done after the early cmdline params (which might carry an USERPATCHES_PATH=xx to point it elsewhere), but before the
+	# arguments loop below, which looks for config files in it. The default directory is created further down, if missing.
+	cli_determine_userpatches_path
 
 	declare -a -g ARMBIAN_CONFIG_FILES=()                                            # fully validated, complete paths to config files.
 	declare -g ARMBIAN_COMMAND_HANDLER="" ARMBIAN_COMMAND="" ARMBIAN_COMMAND_VARS="" # only valid command and handler will ever be set here.
@@ -124,8 +136,8 @@ function cli_entrypoint() {
 	# Also form here, UUID will be generated, output created, logging enabled, etc.
 
 	# Init basic dirs.
-	declare -g -r DEST="${SRC}/output" USERPATCHES_PATH="${SRC}"/userpatches # DEST is the main output dir, and USERPATCHES_PATH is the userpatches dir. read-only.
-	mkdir -p "${DEST}" "${USERPATCHES_PATH}"                                 # Create output and userpatches directory if not already there
+	declare -g -r DEST="${SRC}/output"       # DEST is the main output dir. read-only. (USERPATCHES_PATH is defined further up)
+	mkdir -p "${DEST}" "${USERPATCHES_PATH}" # Create output and userpatches directory if not already there
 	display_alert "Output directory created! DEST:" "${DEST}" "debug"
 
 	# set unique mounting directory for this execution.
@@ -210,6 +222,7 @@ function cli_entrypoint() {
 	done
 
 	# Early check for deprecations
+	apply_deprecated_switch_aliases # forward renamed switches to their new names, with a warning (backward compat)
 	error_if_lib_tag_set # make sure users are not thrown off by using old parameter which does nothing anymore; explain
 
 	display_alert "Executing final CLI command" "${ARMBIAN_COMMAND}" "debug"

@@ -7,6 +7,8 @@
 # This file is a part of the Armbian Build Framework
 # https://github.com/armbian/build/
 #
+import email.errors
+import email.header
 import email.utils
 import logging
 import mailbox
@@ -18,6 +20,7 @@ import tempfile
 import git  # GitPython
 from unidecode import unidecode
 from unidiff import PatchSet
+from rich.text import Text
 
 from common.patching_config import PatchingConfig
 from common.term_colors import background_dark_or_light
@@ -33,6 +36,10 @@ index_zero = f"{'0' * 12}"
 index_from_zero = f"index {'0' * 12}..{'1' * 12}"
 index_not_zero = f"index {'1' * 12}..{'2' * 12}"
 index_rewrite_regexp: re.Pattern = re.compile(r"index ([0-9a-f]{12})\.\.([0-9a-f]{12})")
+
+# What follows the description separator in a patch: optional diffstat lines (they start
+# with a space) and blank lines, then a file diff (a git header, or a "--- "/"+++ " pair).
+patch_start_regexp: re.Pattern = re.compile(r"(?:[ ][^\n]*\n|\n)*(?:diff --git |--- \S[^\n]*\n\+\+\+ )")
 
 
 # Callback used for rewriting index lines.
@@ -223,7 +230,8 @@ class PatchFileInDir:
 					f" the magic date in the patch contents, shouldn't happen. Check the mbox formatting.")
 
 			patches.append(PatchInPatchFile(
-				self, counter, patch_contents, desc, msg['From'], msg['Subject'], msg['Date']))
+				self, counter, patch_contents, desc,
+				header_to_str(msg['From']), header_to_str(msg['Subject']), header_to_str(msg['Date'])))
 
 			counter += 1
 
@@ -241,8 +249,14 @@ class PatchFileInDir:
 		separator = "\n---\n"
 		# check if the separator is in the patch, if so, split
 		if separator in full_message_text:
-			# find the _last_ occurrence of the separator, and split two chunks from that position
+			# Split at the last separator that the patch itself follows, so a footer after the
+			# diff (b4 sends "---" / base-commit / change-id) stays out of it; else at the last one.
 			separator_pos = full_message_text.rfind(separator)
+			candidate_pos = separator_pos
+			while candidate_pos != -1 and not patch_start_regexp.match(full_message_text, candidate_pos + len(separator)):
+				candidate_pos = full_message_text.rfind(separator, 0, candidate_pos)
+			if candidate_pos != -1:
+				separator_pos = candidate_pos
 			desc = full_message_text[:separator_pos]
 			patch = full_message_text[separator_pos + len(separator):]
 			return desc, patch
@@ -431,7 +445,8 @@ class PatchInPatchFile:
 		# log.debug(f"Rejects file is going to be '{rejects_file}'...")
 
 		proc = subprocess.run(
-			["patch", "--batch", "-p1", "-N", f"--reject-file={rejects_file}", "--quoting-style=c"],
+			# Unified rejects regardless of the input patch format: rich_rejects() styles lines by their +/-/@@ prefix.
+			["patch", "--batch", "-p1", "-N", "--reject-format=unified", f"--reject-file={rejects_file}", "--quoting-style=c"],
 			cwd=working_dir,
 			input=real_input,
 			stdout=subprocess.PIPE,
@@ -738,6 +753,18 @@ class PatchInPatchFile:
 				ret = ret.replace(tag, f"[{bold} {color}]{tag}[/{bold} {color}]")
 		return ret
 
+	def rich_rejects(self) -> Text:
+		"""Reject hunks as foldable Text, coloured per line like a diff pager."""
+		line_styles = {"+": "green", "-": "red", "@": "cyan"}
+		text = Text()
+		for line in self.rejects.splitlines(keepends=True):
+			text.append(line, style=line_styles.get(line[:1], ""))
+		# Expand on the Text, not the str: rich counts terminal cells, so wide
+		# characters before a tab keep the columns aligned. 4 instead of rich's
+		# default 8 keeps diff indentation readable in a narrow cell.
+		text.expand_tabs(4)
+		return text
+
 	def apply_patch_date_to_files(self, working_dir, options):
 		# The date applied to the patched files is:
 		# 1) The date of the root Makefile
@@ -852,6 +879,36 @@ def export_commit_as_patch(repo: git.Repo, commit: str):
 	return rewritten_indexes
 
 
+def header_to_str(value) -> "str | None":
+	# mailbox.mbox parses with the legacy compat32 policy, so a mail header that
+	# carries raw (non-RFC2047) UTF-8 - e.g. `From: Michał Dziękoński <...>` - comes
+	# back as an email.header.Header tagged 'unknown-8bit' instead of a str, and the
+	# downstream re.match() blows up with "expected string or bytes-like object, got
+	# 'Header'". Decode such headers as UTF-8 (like git mailinfo does) so patches with
+	# non-ASCII authors parse instead of aborting the whole kernel build.
+	if value is None or isinstance(value, str):
+		return value
+	try:
+		decoded_parts = email.header.decode_header(value)
+	except email.errors.HeaderParseError:
+		# A malformed encoded-word (e.g. bad base64) makes decode_header() itself raise,
+		# before the per-part loop can run. Fall back to the raw string form rather than
+		# aborting the whole build; downstream parsing already tolerates mangled text.
+		return str(value)
+	parts = []
+	for data, enc in decoded_parts:
+		if isinstance(data, bytes):
+			if enc is None or enc.lower() in ("unknown-8bit", "x-unknown", "unknown"):
+				enc = "utf-8"
+			try:
+				parts.append(data.decode(enc, "replace"))
+			except LookupError:
+				parts.append(data.decode("utf-8", "replace"))
+		else:
+			parts.append(data)
+	return "".join(parts)
+
+
 # Hack
 def downgrade_to_ascii(utf8: str) -> str:
 	return unidecode(utf8)
@@ -903,6 +960,10 @@ def perform_git_archeology(
 	all_commits: list = []
 	for found_file in patch_file_paths:
 		relative_file_path = os.path.relpath(found_file, base_armbian_src_dir)
+		if relative_file_path.startswith(".."):
+			# Not in the repo at all (eg: a patch in an USERPATCHES_PATH elsewhere); git has no history for it, and would bomb.
+			log.info(f"- Skipping archeology for {found_file}, it is outside of the repo")
+			continue
 		hexshas = armbian_git_repo.git.log('--pretty=%H', '--follow', '--find-copies-harder', '--', relative_file_path) \
 			.split('\n')
 		log.info(f"- Trying to recover description for {relative_file_path} from {len(hexshas)} commits")

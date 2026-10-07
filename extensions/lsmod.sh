@@ -1,3 +1,5 @@
+# @description Runs `make localmodconfig` against a captured `lsmod` file to strip the kernel down to only the modules your hardware actually loads, compiling several times faster. Reads the file from `userpatches/lsmod/${LSMOD}.lsmod`, where the `LSMOD` variable defaults to `$BOARD`. Errors out if that file is missing.
+
 function extension_prepare_config__prepare_localmodconfig() {
 	# If defined, ${LSMOD} can contain a lsmod to apply to the kernel configuration.
 	# to get a file for this run 'lsmod > my_machine.lsmod' and then put it in userpatches/lsmod/
@@ -5,7 +7,7 @@ function extension_prepare_config__prepare_localmodconfig() {
 	display_alert "${EXTENSION}: lsmod enabled" "${LSMOD}" "warn"
 
 	# If there, make sure it exists
-	declare -g -r lsmod_file="${SRC}/userpatches/lsmod/${LSMOD}.lsmod"
+	declare -g -r lsmod_file="${USERPATCHES_PATH}/lsmod/${LSMOD}.lsmod"
 	if [[ ! -f "${lsmod_file}" ]]; then
 		exit_with_error "Can't find lsmod file ${lsmod_file}, create it by running lsmod on target HW or configure with LSMOD=xxx"
 	fi

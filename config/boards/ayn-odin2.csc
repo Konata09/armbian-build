@@ -34,9 +34,10 @@ if [[ "${WITH_GRUB}" == "yes" ]]; then
 	enable_extension "grub-with-dtb" # important, puts the whole DTB handling in place.
 else
 	declare -g BOOTFS_TYPE="fat"
-	declare -g BOOTSIZE="256"
+	declare -g BOOTSIZE="512"
 	declare -g IMAGE_PARTITION_TABLE="gpt"
 	declare -g BOOTIMG_CMDLINE_EXTRA="clk_ignore_unused pd_ignore_unused rw quiet rootwait"
+	declare -g BOOT_FDT_FILE="qcom/qcs8550-${BOARD}.dtb"
 
 	function pre_umount_final_image__update_ABL_settings() {
 		if [ -z "$BOOTFS_TYPE" ]; then
@@ -80,6 +81,8 @@ function post_family_tweaks_bsp__ayn-odin2_firmware() {
 	install -Dm655 $SRC/packages/bsp/usb-gadget-network/dropbear $destination/etc/initramfs-tools/scripts/init-premount/
 	install -Dm655 $SRC/packages/bsp/usb-gadget-network/kill-dropbear $destination/etc/initramfs-tools/scripts/init-bottom/
 
+	install -Dm755 $SRC/packages/bsp/ayn-odin2/zz-update-abl-kernel $destination/etc/kernel/postinst.d/zz-update-abl-kernel
+
 	return 0
 }
 
@@ -97,6 +100,9 @@ function post_family_tweaks__ayn-odin2_enable_services() {
 
 	# Add Gamepad udev rule
 	echo 'SUBSYSTEM=="input", ATTRS{name}=="AYN Odin2 Gamepad", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"' > "${SDCARD}"/etc/udev/rules.d/99-ignore-gamepad.rules
+	# Add Gamepad SDL mapping
+	mkdir -p "${SDCARD}"/etc/environment.d
+	echo 'SDL_GAMECONTROLLERCONFIG="03000000202000000130000001000000,AYN Odin2 Gamepad,platform:Linux,crc:05b6,a:b0,b:b1,x:b3,y:b2,back:b6,guide:b8,start:b7,leftstick:b9,rightstick:b10,leftshoulder:b4,rightshoulder:b5,dpup:b11,dpdown:b12,dpleft:b13,dpright:b14,misc1:b15,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,"' > "${SDCARD}"/etc/environment.d/99-sdl-gamepad.conf
 	# Not Any driver support suspend mode
 	chroot_sdcard systemctl mask suspend.target
 
@@ -113,18 +119,18 @@ function post_family_tweaks_bsp__ayn-odin2_bsp_firmware_in_initrd() {
 		#!/bin/bash
 		[[ "$1" == "prereqs" ]] && exit 0
 		. /usr/share/initramfs-tools/hook-functions
-		for f in $(find /lib/firmware/qcom/sm8550 -type f) ; do
+		for f in $(find /lib/firmware/qcom/sm8550 -type f -follow) ; do
 		add_firmware "${f#/lib/firmware/}"
 		done
 		add_firmware "qcom/a740_sqe.fw" # Extra one for dpu
 		add_firmware "qcom/gmu_gen70200.bin" # Extra one for gpu
 		add_firmware "qcom/vpu/vpu30_p4.mbn" # Extra one for vpu
 		# Extra one for wifi
-		for f in $(find /lib/firmware/ath12k/WCN7850/hw2.0 -type f) ; do
+		for f in $(find /lib/firmware/ath12k/WCN7850/hw2.0 -type f -follow) ; do
 		add_firmware "${f#/lib/firmware/}"
 		done
 		# Extra one for bt
-		for f in $(find /lib/firmware/qca -type f) ; do
+		for f in $(find /lib/firmware/qca -type f -follow) ; do
 		add_firmware "${f#/lib/firmware/}"
 		done
 	FIRMWARE_HOOK
