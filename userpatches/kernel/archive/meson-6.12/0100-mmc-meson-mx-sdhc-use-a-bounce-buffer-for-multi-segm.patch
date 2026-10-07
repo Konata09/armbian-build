@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Konata09 <lz9709@gmail.com>
+Date: Wed, 7 Oct 2026 23:00:00 +0800
+Subject: mmc: meson-mx-sdhc: use a bounce buffer for multi-segment requests
+
+The SDHC DMA engine only takes a single address per transfer, so the
+driver leaves max_segs at the default of 1. Since page cache and O_DIRECT
+buffers are rarely physically contiguous, almost every request ends up
+being a single 4KiB page and the per-command overhead dominates: a Samsung
+eMMC 5.1 in HS200 mode reads at ~16MB/s with O_DIRECT, while the same card
+reaches ~70MB/s whenever the block layer happens to build large contiguous
+requests.
+
+Allocate a 128KiB bounce buffer (the existing max_req_size) and raise
+max_segs accordingly, similar to what sdhci does for controllers without
+scatter-gather support. Single-segment requests keep using the buffer
+directly without copying.
+
+The buffer is only handed back to the CPU after the RX FIFO has been
+flushed and drained (or the controller was reset after an error), which
+also fixes the DMA mapping being leaked for failed data commands.
+---
+ drivers/mmc/host/meson-mx-sdhc-mmc.c | 93 ++++++++++++++++++++++++++--
+ 1 file changed, 87 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/mmc/host/meson-mx-sdhc-mmc.c b/drivers/mmc/host/meson-mx-sdhc-mmc.c
+index 31f7503..d9a78d3 100644
+--- a/drivers/mmc/host/meson-mx-sdhc-mmc.c
++++ b/drivers/mmc/host/meson-mx-sdhc-mmc.c
+@@ -27,6 +27,7 @@
+ 
+ #define MESON_SDHC_NUM_BULK_CLKS				4
+ #define MESON_SDHC_MAX_BLK_SIZE					512
++#define MESON_SDHC_BOUNCE_SIZE					SZ_128K
+ #define MESON_SDHC_NUM_TUNING_TRIES				10
+ 
+ #define MESON_SDHC_WAIT_CMD_READY_SLEEP_US			1
+@@ -56,6 +57,14 @@ struct meson_mx_sdhc_host {
+ 	bool				bulk_clks_enabled;
+ 
+ 	const struct meson_mx_sdhc_data	*platform;
++
++	/*
++	 * The DMA engine only takes a single address per transfer. Requests
++	 * spanning more than one segment are copied through this buffer
++	 * instead of being split into (mostly 4KiB) single-segment requests.
++	 */
++	void				*bounce_buf;
++	dma_addr_t			bounce_addr;
+ };
+ 
+ static const struct regmap_config meson_mx_sdhc_regmap_config = {
+@@ -65,6 +74,11 @@ static const struct regmap_config meson_mx_sdhc_regmap_config = {
+ 	.max_register = MESON_SDHC_CLK2,
+ };
+ 
++static bool meson_mx_sdhc_use_bounce(struct mmc_data *data)
++{
++	return data->sg_len > 1;
++}
++
+ static void meson_mx_sdhc_reset(struct meson_mx_sdhc_host *host)
+ {
+ 	regmap_write(host->regmap, MESON_SDHC_SRST, MESON_SDHC_SRST_MAIN_CTRL |
+@@ -221,7 +235,8 @@ static void meson_mx_sdhc_start_cmd(struct mmc_host *mmc,
+ 
+ 	if (cmd->data)
+ 		regmap_write(host->regmap, MESON_SDHC_ADDR,
+-			     sg_dma_address(cmd->data->sg));
++			     meson_mx_sdhc_use_bounce(cmd->data) ?
++			     host->bounce_addr : sg_dma_address(cmd->data->sg));
+ 
+ 	meson_mx_sdhc_wait_cmd_ready(mmc);
+ 
+@@ -362,12 +377,26 @@ static void meson_mx_sdhc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+ 
+ static int meson_mx_sdhc_map_dma(struct mmc_host *mmc, struct mmc_request *mrq)
+ {
++	struct meson_mx_sdhc_host *host = mmc_priv(mmc);
+ 	struct mmc_data *data = mrq->data;
+-	unsigned int dma_len;
++	unsigned int dma_len, len;
+ 
+ 	if (!data)
+ 		return 0;
+ 
++	if (meson_mx_sdhc_use_bounce(data)) {
++		len = data->blksz * data->blocks;
++
++		if (data->flags & MMC_DATA_WRITE)
++			sg_copy_to_buffer(data->sg, data->sg_len,
++					  host->bounce_buf, len);
++
++		dma_sync_single_for_device(mmc_dev(mmc), host->bounce_addr,
++					   len, mmc_get_dma_dir(data));
++
++		return 0;
++	}
++
+ 	dma_len = dma_map_sg(mmc_dev(mmc), data->sg, data->sg_len,
+ 			     mmc_get_dma_dir(data));
+ 	if (!dma_len) {
+@@ -378,6 +407,28 @@ static int meson_mx_sdhc_map_dma(struct mmc_host *mmc, struct mmc_request *mrq)
+ 	return 0;
+ }
+ 
++static void meson_mx_sdhc_unmap_dma(struct mmc_host *mmc,
++				    struct mmc_data *data)
++{
++	struct meson_mx_sdhc_host *host = mmc_priv(mmc);
++	unsigned int len;
++
++	if (!meson_mx_sdhc_use_bounce(data)) {
++		dma_unmap_sg(mmc_dev(mmc), data->sg, data->sg_len,
++			     mmc_get_dma_dir(data));
++		return;
++	}
++
++	len = data->blksz * data->blocks;
++
++	dma_sync_single_for_cpu(mmc_dev(mmc), host->bounce_addr, len,
++				mmc_get_dma_dir(data));
++
++	if (data->flags & MMC_DATA_READ && !data->error)
++		sg_copy_from_buffer(data->sg, data->sg_len, host->bounce_buf,
++				    len);
++}
++
+ static void meson_mx_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq)
+ {
+ 	struct meson_mx_sdhc_host *host = mmc_priv(mmc);
+@@ -597,9 +648,6 @@ static irqreturn_t meson_mx_sdhc_irq_thread(int irq, void *irq_data)
+ 					   val);
+ 		}
+ 
+-		dma_unmap_sg(mmc_dev(host->mmc), cmd->data->sg,
+-			     cmd->data->sg_len, mmc_get_dma_dir(cmd->data));
+-
+ 		cmd->data->bytes_xfered = cmd->data->blksz * cmd->data->blocks;
+ 	}
+ 
+@@ -625,6 +673,13 @@ static irqreturn_t meson_mx_sdhc_irq_thread(int irq, void *irq_data)
+ 		 */
+ 		meson_mx_sdhc_clear_fifo(host->mmc);
+ 
++	/*
++	 * Only hand the buffer back to the CPU once the (manually flushed) RX
++	 * FIFO has been drained or the controller was reset after an error.
++	 */
++	if (cmd->data)
++		meson_mx_sdhc_unmap_dma(host->mmc, cmd->data);
++
+ 	meson_mx_sdhc_request_done(host);
+ 
+ 	return IRQ_HANDLED;
+@@ -762,6 +817,14 @@ static void meason_mx_mmc_free_host(void *data)
+        mmc_free_host(data);
+ }
+ 
++static void meson_mx_sdhc_unmap_bounce(void *data)
++{
++	struct meson_mx_sdhc_host *host = data;
++
++	dma_unmap_single(mmc_dev(host->mmc), host->bounce_addr,
++			 MESON_SDHC_BOUNCE_SIZE, DMA_BIDIRECTIONAL);
++}
++
+ static int meson_mx_sdhc_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -822,8 +885,26 @@ static int meson_mx_sdhc_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_disable_pclk;
+ 
+-	mmc->max_req_size = SZ_128K;
++	host->bounce_buf = devm_kmalloc(dev, MESON_SDHC_BOUNCE_SIZE, GFP_KERNEL);
++	if (!host->bounce_buf) {
++		ret = -ENOMEM;
++		goto err_disable_pclk;
++	}
++
++	host->bounce_addr = dma_map_single(dev, host->bounce_buf,
++					   MESON_SDHC_BOUNCE_SIZE,
++					   DMA_BIDIRECTIONAL);
++	ret = dma_mapping_error(dev, host->bounce_addr);
++	if (ret)
++		goto err_disable_pclk;
++
++	ret = devm_add_action_or_reset(dev, meson_mx_sdhc_unmap_bounce, host);
++	if (ret)
++		goto err_disable_pclk;
++
++	mmc->max_req_size = MESON_SDHC_BOUNCE_SIZE;
+ 	mmc->max_seg_size = mmc->max_req_size;
++	mmc->max_segs = MESON_SDHC_BOUNCE_SIZE / MESON_SDHC_MAX_BLK_SIZE;
+ 	mmc->max_blk_count = FIELD_GET(MESON_SDHC_SEND_TOTAL_PACK, ~0);
+ 	mmc->max_blk_size = MESON_SDHC_MAX_BLK_SIZE;
+ 	mmc->max_busy_timeout = 30 * MSEC_PER_SEC;
