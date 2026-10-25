@@ -1,0 +1,179 @@
+From 20b12312d54f0924f279c074bf0023971bca5476 Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 00:02:05 +0800
+Subject: [PATCH 8/9] hwmon: add HiSilicon Ascend 310 LPM3 temperature driver
+
+The LPM3 power-management core of the Ascend 310 writes the on-die
+temperatures to a buffer in reserved DRAM. Expose them through hwmon
+and register a thermal zone for the hottest sensor.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/hwmon/Kconfig          |  12 ++++
+ drivers/hwmon/Makefile         |   1 +
+ drivers/hwmon/ascend310-temp.c | 118 +++++++++++++++++++++++++++++++++
+ 3 files changed, 131 insertions(+)
+ create mode 100644 drivers/hwmon/ascend310-temp.c
+
+diff --git a/drivers/hwmon/Kconfig b/drivers/hwmon/Kconfig
+index 4d852e68b..8f97702a1 100644
+--- a/drivers/hwmon/Kconfig
++++ b/drivers/hwmon/Kconfig
+@@ -278,6 +278,18 @@ config SENSORS_AS370
+ 	  will be called as370-hwmon.
+ 
+ 
++config SENSORS_ASCEND310
++	tristate "HiSilicon Ascend 310 temperature sensors"
++	depends on ARM64 || COMPILE_TEST
++	depends on OF
++	help
++	  If you say yes here you get support for the on-die temperatures
++	  that the LPM3 power-management core of the HiSilicon Ascend 310
++	  (Hi1910) publishes in shared memory.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called ascend310-temp.
++
+ config SENSORS_ASC7621
+ 	tristate "Andigilog aSC7621"
+ 	depends on I2C
+diff --git a/drivers/hwmon/Makefile b/drivers/hwmon/Makefile
+index 73b2abdcc..f5681bb9e 100644
+--- a/drivers/hwmon/Makefile
++++ b/drivers/hwmon/Makefile
+@@ -52,6 +52,7 @@ obj-$(CONFIG_SENSORS_AQUACOMPUTER_D5NEXT) += aquacomputer_d5next.o
+ obj-$(CONFIG_SENSORS_ARM_SCMI)	+= scmi-hwmon.o
+ obj-$(CONFIG_SENSORS_ARM_SCPI)	+= scpi-hwmon.o
+ obj-$(CONFIG_SENSORS_AS370)	+= as370-hwmon.o
++obj-$(CONFIG_SENSORS_ASCEND310)	+= ascend310-temp.o
+ obj-$(CONFIG_SENSORS_ASC7621)	+= asc7621.o
+ obj-$(CONFIG_SENSORS_ASPEED)	+= aspeed-pwm-tacho.o
+ obj-$(CONFIG_SENSORS_ASPEED_G6) += aspeed-g6-pwm-tach.o
+diff --git a/drivers/hwmon/ascend310-temp.c b/drivers/hwmon/ascend310-temp.c
+new file mode 100644
+index 000000000..74c2438d1
+--- /dev/null
++++ b/drivers/hwmon/ascend310-temp.c
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * HiSilicon Ascend 310 (Hi1910) on-die temperatures.
++ *
++ * The LPM3 power-management core samples the die sensors and stores the
++ * results, one byte per sensor in degrees Celsius, in a buffer in reserved
++ * DRAM. Bytes 0-3 hold the individual sensors and byte 9 the hottest one,
++ * which is the value the vendor tools report as the chip temperature.
++ */
++
++#include <linux/hwmon.h>
++#include <linux/io.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++
++#define ASCEND310_TEMP_MAX_OFFSET	9
++
++struct ascend310_temp {
++	void __iomem *base;
++};
++
++static const char * const ascend310_temp_labels[] = {
++	"soc", "sensor0", "sensor1", "sensor2", "sensor3",
++};
++
++/* channel 0 is the hottest sensor, channels 1-4 are sensors 0-3 */
++static unsigned int ascend310_temp_offset(int channel)
++{
++	return channel ? channel - 1 : ASCEND310_TEMP_MAX_OFFSET;
++}
++
++static int ascend310_temp_read(struct device *dev, enum hwmon_sensor_types type,
++			       u32 attr, int channel, long *val)
++{
++	struct ascend310_temp *priv = dev_get_drvdata(dev);
++
++	*val = readb(priv->base + ascend310_temp_offset(channel)) * 1000L;
++	return 0;
++}
++
++static int ascend310_temp_read_string(struct device *dev,
++				      enum hwmon_sensor_types type, u32 attr,
++				      int channel, const char **str)
++{
++	*str = ascend310_temp_labels[channel];
++	return 0;
++}
++
++static const struct hwmon_channel_info * const ascend310_temp_info[] = {
++	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
++	HWMON_CHANNEL_INFO(temp,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL),
++	NULL
++};
++
++static const struct hwmon_ops ascend310_temp_ops = {
++	.visible = 0444,
++	.read = ascend310_temp_read,
++	.read_string = ascend310_temp_read_string,
++};
++
++static const struct hwmon_chip_info ascend310_temp_chip_info = {
++	.ops = &ascend310_temp_ops,
++	.info = ascend310_temp_info,
++};
++
++static int ascend310_temp_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct ascend310_temp *priv;
++	struct device *hwmon;
++	struct resource *res;
++
++	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || resource_size(res) <= ASCEND310_TEMP_MAX_OFFSET)
++		return -EINVAL;
++
++	/*
++	 * The buffer sits in no-map reserved memory that is already claimed
++	 * as "reserved", so map it without requesting the region. An uncached
++	 * mapping is needed because the LPM3 writes behind the CPU caches.
++	 */
++	priv->base = devm_ioremap(dev, res->start, resource_size(res));
++	if (!priv->base)
++		return -ENOMEM;
++
++	hwmon = devm_hwmon_device_register_with_info(dev, "ascend310_temp", priv,
++						     &ascend310_temp_chip_info,
++						     NULL);
++	return PTR_ERR_OR_ZERO(hwmon);
++}
++
++static const struct of_device_id ascend310_temp_of_match[] = {
++	{ .compatible = "hisilicon,ascend310-lpm3-temp" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ascend310_temp_of_match);
++
++static struct platform_driver ascend310_temp_driver = {
++	.driver = {
++		.name = "ascend310-temp",
++		.of_match_table = ascend310_temp_of_match,
++	},
++	.probe = ascend310_temp_probe,
++};
++module_platform_driver(ascend310_temp_driver);
++
++MODULE_DESCRIPTION("HiSilicon Ascend 310 LPM3 temperature driver");
++MODULE_LICENSE("GPL");
+-- 
+2.43.0
+

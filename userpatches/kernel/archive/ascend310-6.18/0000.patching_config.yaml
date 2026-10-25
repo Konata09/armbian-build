@@ -1,0 +1,10 @@
+config:
+  name: ascend310-6.18
+  kind: kernel
+  type: mainline
+  branch: linux-6.18.y
+  last-known-good-tag: v6.18.58
+  dts-directories:
+    - { source: "dt", target: "arch/arm64/boot/dts/hisilicon" }
+  auto-patch-dt-makefile:
+    - { directory: "arch/arm64/boot/dts/hisilicon", config-var: "CONFIG_ARCH_HISI" }

@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Pack, inspect and write the boot components of an Ascend 310 (Hi1910) SD card.
+
+The xloader/UEFI in SPI flash looks for magic blocks at sectors 16/17 and for
+the main/backup component tables at sectors 18/19.  Each table holds the base
+sector of a 36 MiB area and (offset, size) pairs, in sectors, for its four
+components: 0 is the LPM3 firmware, 1 the TEE, 2 the HSDT device tree
+container and 3 the kernel Image.  Every component carries an unsigned 16 KiB
+Huawei header (SHA-256 of the payload at 0x2c, total size at 0x498) that the
+loader checks before it jumps to the kernel.
+"""
+import argparse
+import hashlib
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+
+SECTOR = 512
+HDR_LEN = 0x4000
+MAGIC = 0x55AA55AA
+HEAD_MAGIC = 0x33CC33CC
+TABLE_MAGIC = 0xAA55AA55
+TABLE_MAGIC_SECTOR = {"main": 16, "backup": 17}
+TABLE_SECTOR = {"main": 18, "backup": 19}
+COMP_LPM3, COMP_TEE, COMP_DT, COMP_KERNEL = 0, 1, 2, 3
+# (offset, size) of each component inside an area, in sectors, as the vendor lays them out
+COMP_LAYOUT = ((0, 0x400), (0x800, 0x400), (0x1000, 0x1000), (0x2000, 0x10000))
+AREA_SECTORS = 0x12000
+COMP_TAGS = {COMP_LPM3: "lpm3.img", COMP_TEE: "tee.bin", COMP_DT: "dt_raw.img", COMP_KERNEL: "Image"}
+HSDT_BLOCK = 2048
+# board id of the DLAP-221 entry in the HSDT container (boardid=004)
+DLAP221_DT_ID = bytes.fromhex("0100000400000000")
+
+
+def pack(raw, tag, version="0.0.0.0.0"):
+    """Wrap raw in the unsigned header that image_pack.py -platform hi1910 writes."""
+    digest = hashlib.sha256(raw).digest()
+    h = bytearray(HDR_LEN)
+    struct.pack_into("<III", h, 0, MAGIC, 0x470, 0)
+    h[0x2c:0x4c] = digest
+    struct.pack_into("<IIII", h, 0x4c, 0x500, 0x1000, 0, 512)
+    struct.pack_into("<IIIII", h, 0x45c, HDR_LEN, len(raw), 0x1500, 0x1700, HEAD_MAGIC)
+    v = [int(x, 16) for x in version.split(".")]
+    struct.pack_into("<IIII", h, 0x480, v[0], v[1], v[2], (v[3] << 16) | (v[4] & 0xFFFF))
+    struct.pack_into("<QI", h, 0x490, 0, HDR_LEN + len(raw))
+    t = tag.encode()[:31]
+    h[0x4a0:0x4a0 + len(t)] = t
+    # second copy of the header essentials
+    struct.pack_into("<I", h, 0x2000, MAGIC)
+    h[0x202c:0x204c] = digest
+    struct.pack_into("<I", h, 0x2460, len(raw))
+    struct.pack_into("<I", h, 0x246c, HEAD_MAGIC)
+    return bytes(h) + raw
+
+
+def parse_header(d):
+    """Return (tag, payload length, total length, sha256 ok) or None."""
+    if len(d) < HDR_LEN or struct.unpack_from("<I", d, 0)[0] != MAGIC:
+        return None
+    code_off, code_len = struct.unpack_from("<II", d, 0x45c)
+    total = struct.unpack_from("<I", d, 0x498)[0]
+    tag = d[0x4a0:0x4c0].split(b"\0")[0].decode(errors="replace")
+    ok = None
+    if len(d) >= code_off + code_len:
+        ok = hashlib.sha256(d[code_off:code_off + code_len]).digest() == d[0x2c:0x4c]
+    return tag, code_len, total, ok
+
+
+def load_packed(path, tag):
+    d = open(path, "rb").read()
+    hp = parse_header(d)
+    if not (hp and hp[3] and hp[2] == len(d)):
+        sys.exit("%s: not a valid packed image" % path)
+    if hp[0] != tag:
+        sys.exit("%s: tag %r, expected %r" % (path, hp[0], tag))
+    return d
+
+
+def hsdt_entries(body):
+    assert body[:4] == b"HSDT", "not an HSDT container"
+    n = struct.unpack_from("<I", body, 8)[0]
+    ents = []
+    for i in range(n):
+        e = body[0xc + 0x28 * i:0xc + 0x28 * (i + 1)]
+        off = struct.unpack_from("<I", e, 0x10)[0]
+        size = int.from_bytes(body[off + 4:off + 8], "big")
+        ents.append((e[:8], body[off:off + size]))
+    return ents
+
+
+def hsdt_build(ents):
+    """Lay out an HSDT container exactly like the vendor mkdtb.py."""
+    n = len(ents)
+    hdr_len = 12 + 40 * n + 4
+    o = bytearray(b"HSDT" + struct.pack("<II", 1, n))
+    offset = hdr_len + (HSDT_BLOCK - hdr_len % HSDT_BLOCK)
+    table = []
+    for bid, blob in ents:
+        size = len(blob) + (HSDT_BLOCK - len(blob) % HSDT_BLOCK)
+        table.append((bid, size, offset, blob))
+        offset += size
+    for bid, size, off, _ in table:
+        o += bid + struct.pack("<IIIIQQ", size, 0, off, 0, 0, 0)
+    o += struct.pack("<I", 0)
+    o += b"\0" * (hdr_len + (HSDT_BLOCK - hdr_len % HSDT_BLOCK) - len(o))
+    for _, size, off, blob in table:
+        assert len(o) == off
+        o += blob + b"\0" * (size - len(blob))
+    return bytes(o)
+
+
+def read_tables(dev):
+    with open(dev, "rb") as f:
+        f.seek(16 * SECTOR)
+        head = f.read(4 * SECTOR)
+    tables = {}
+    for slot in ("main", "backup"):
+        m = struct.unpack_from("<I", head, (TABLE_MAGIC_SECTOR[slot] - 16) * SECTOR)[0]
+        t = (TABLE_SECTOR[slot] - 16) * SECTOR
+        base = struct.unpack_from("<Q", head, t)[0]
+        comps = [struct.unpack_from("<QQ", head, t + 8 + 16 * i) for i in range(4)]
+        tables[slot] = (m == TABLE_MAGIC, base, comps)
+    return tables
+
+
+def check_no_overlap(dev, bases):
+    """Refuse areas that overlap an MBR partition or the loader tables."""
+    with open(dev, "rb") as f:
+        mbr = f.read(SECTOR)
+    parts = []
+    if mbr[510:512] == b"\x55\xaa":
+        for i in range(4):
+            ptype = mbr[0x1be + 16 * i + 4]
+            start, count = struct.unpack_from("<II", mbr, 0x1be + 16 * i + 8)
+            if ptype and count:
+                parts.append((start, start + count))
+    for base in bases:
+        if base < 2048:
+            sys.exit("area at sector %d overlaps the partition table and loader tables" % base)
+        for start, end in parts:
+            if base < end and start < base + AREA_SECTORS:
+                sys.exit("area at sector %d overlaps partition %d-%d" % (base, start, end))
+
+
+def write_verified(dev, jobs):
+    """jobs: list of (label, byte offset, data). Write, sync, drop caches, read back."""
+    with open(dev, "r+b") as f:
+        for _, pos, d in jobs:
+            f.seek(pos)
+            f.write(d)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        open("/proc/sys/vm/drop_caches", "w").write("1\n")
+    except OSError:
+        pass
+    with open(dev, "rb") as f:
+        for label, pos, d in jobs:
+            f.seek(pos)
+            ok = f.read(len(d)) == d
+            print("%s -> %s sector %d: %s" % (label, dev, pos // SECTOR, "verified" if ok else "MISMATCH"))
+            if not ok:
+                sys.exit(1)
+
+
+def slot_jobs(dev, slot, items):
+    """items: list of (component, label, data); returns write jobs for that slot."""
+    magic, base, comps = read_tables(dev)[slot]
+    if not magic:
+        sys.exit("%s table magic missing" % slot)
+    check_no_overlap(dev, [base])
+    jobs = []
+    for comp, label, d in items:
+        off, size = comps[comp]
+        if len(d) > size * SECTOR:
+            sys.exit("%s: %d bytes does not fit in %d" % (label, len(d), size * SECTOR))
+        jobs.append(("%s (%s)" % (label, slot), (base + off) * SECTOR, d))
+    return jobs
+
+
+def cmd_pack(a):
+    raw = open(a.raw, "rb").read()
+    tag = a.tag or os.path.basename(a.raw)
+    open(a.out, "wb").write(pack(raw, tag, a.version))
+    print("%s: packed, payload %d bytes, tag %r" % (a.out, len(raw), tag))
+
+
+def cmd_mkdt(a):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = a.dtb
+        if a.bootargs is not None:
+            path = os.path.join(tmp, "board.dtb")
+            open(path, "wb").write(open(a.dtb, "rb").read())
+            subprocess.check_call(["fdtput", "-t", "s", path, "/chosen", "bootargs", a.bootargs])
+        dtb = open(path, "rb").read()
+    assert dtb[:4] == b"\xd0\x0d\xfe\xed", "not a flattened device tree"
+    if a.base:
+        d = open(a.base, "rb").read()
+        body = d[HDR_LEN:] if parse_header(d) else d
+        ents = hsdt_entries(body)
+        ids = [bid for bid, _ in ents]
+        assert DLAP221_DT_ID in ids, "base container has no DLAP-221 entry"
+        ents = [(bid, dtb if bid == DLAP221_DT_ID else blob) for bid, blob in ents]
+    else:
+        ents = [(DLAP221_DT_ID, dtb)]
+    # the loader expects the tag that image_pack.py derives from dt_raw.img
+    open(a.out, "wb").write(pack(hsdt_build(ents), "dt_raw.img", a.version))
+    print("%s: HSDT with %d entries, DLAP-221 entry %d bytes" % (a.out, len(ents), len(dtb)))
+
+
+def cmd_show(a):
+    with open(a.dev, "rb") as f:
+        for slot, (magic, base, comps) in read_tables(a.dev).items():
+            print("%s: magic %s, base sector %d" % (slot, "ok" if magic else "MISSING", base))
+            for i, (off, size) in enumerate(comps):
+                if not size:
+                    continue
+                f.seek((base + off) * SECTOR)
+                hp = parse_header(f.read(HDR_LEN))
+                if hp and hp[2] <= size * SECTOR:
+                    f.seek((base + off) * SECTOR)
+                    hp = parse_header(f.read(hp[2]))
+                    print("  comp%d @+%d (%d KiB): %-12s payload %9d  total %9d  sha256 %s"
+                          % (i, off, size // 2, hp[0], hp[1], hp[2], "ok" if hp[3] else "BAD"))
+                else:
+                    print("  comp%d @+%d (%d KiB): no header" % (i, off, size // 2))
+
+
+def cmd_init(a):
+    """Create both loader tables and areas, with the firmware components in place."""
+    check_no_overlap(a.dev, [a.main, a.backup])
+    if abs(a.main - a.backup) < AREA_SECTORS:
+        sys.exit("main and backup areas overlap")
+    lpm3 = load_packed(a.lpm3, COMP_TAGS[COMP_LPM3])
+    tee = load_packed(a.tee, COMP_TAGS[COMP_TEE])
+    head = bytearray(4 * SECTOR)
+    for slot, base in (("main", a.main), ("backup", a.backup)):
+        struct.pack_into("<I", head, (TABLE_MAGIC_SECTOR[slot] - 16) * SECTOR, TABLE_MAGIC)
+        t = (TABLE_SECTOR[slot] - 16) * SECTOR
+        struct.pack_into("<Q", head, t, base)
+        for i, (off, size) in enumerate(COMP_LAYOUT):
+            struct.pack_into("<QQ", head, t + 8 + 16 * i, off, size)
+    jobs = [("loader tables", 16 * SECTOR, bytes(head))]
+    for slot, base in (("main", a.main), ("backup", a.backup)):
+        for comp, d in ((COMP_LPM3, lpm3), (COMP_TEE, tee)):
+            off, size = COMP_LAYOUT[comp]
+            jobs.append(("%s (%s)" % (COMP_TAGS[comp], slot), (base + off) * SECTOR, d))
+    write_verified(a.dev, jobs)
+
+
+def cmd_write(a):
+    items = []
+    if a.dt:
+        items.append((COMP_DT, a.dt, load_packed(a.dt, COMP_TAGS[COMP_DT])))
+    if a.kernel:
+        items.append((COMP_KERNEL, a.kernel, load_packed(a.kernel, COMP_TAGS[COMP_KERNEL])))
+    write_verified(a.dev, slot_jobs(a.dev, a.slot, items))
+
+
+def cmd_backup(a):
+    """Copy the main dt and kernel to the backup area, if they are intact."""
+    magic, base, comps = read_tables(a.dev)["main"]
+    if not magic:
+        sys.exit("main table magic missing")
+    items = []
+    with open(a.dev, "rb") as f:
+        for comp in (COMP_DT, COMP_KERNEL):
+            off, size = comps[comp]
+            f.seek((base + off) * SECTOR)
+            hp = parse_header(f.read(HDR_LEN))
+            if not hp or hp[2] > size * SECTOR:
+                print("main %s has no valid header, backup left unchanged" % COMP_TAGS[comp])
+                return
+            f.seek((base + off) * SECTOR)
+            d = f.read(hp[2])
+            if not parse_header(d)[3]:
+                print("main %s fails its hash, backup left unchanged" % COMP_TAGS[comp])
+                return
+            items.append((comp, "main " + COMP_TAGS[comp], d))
+    write_verified(a.dev, slot_jobs(a.dev, "backup", items))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="cmd")
+    s = sub.add_parser("pack", help="wrap a raw image in the Huawei header")
+    s.add_argument("raw")
+    s.add_argument("out")
+    s.add_argument("--tag", help="header tag (default: basename of raw)")
+    s.add_argument("--version", default="0.0.0.0.0")
+    s.set_defaults(fn=cmd_pack)
+    s = sub.add_parser("mkdt", help="build a packed HSDT container holding the DLAP-221 dtb")
+    s.add_argument("dtb")
+    s.add_argument("out")
+    s.add_argument("--base", help="vendor dt.img whose other entries are kept")
+    s.add_argument("--bootargs", help="replace /chosen/bootargs (needs fdtput)")
+    s.add_argument("--version", default="0.0.0.0.0")
+    s.set_defaults(fn=cmd_mkdt)
+    s = sub.add_parser("show", help="list the boot components on a card")
+    s.add_argument("dev")
+    s.set_defaults(fn=cmd_show)
+    s = sub.add_parser("init", help="create the loader tables and firmware components")
+    s.add_argument("dev")
+    s.add_argument("--main", type=int, required=True, help="main area start sector")
+    s.add_argument("--backup", type=int, required=True, help="backup area start sector")
+    s.add_argument("--lpm3", required=True, help="packed lpm3.img")
+    s.add_argument("--tee", required=True, help="packed tee.bin")
+    s.set_defaults(fn=cmd_init)
+    s = sub.add_parser("write", help="write packed images into a slot and verify")
+    s.add_argument("dev")
+    s.add_argument("--slot", choices=("main", "backup"), required=True)
+    s.add_argument("--dt", help="packed dt.img")
+    s.add_argument("--kernel", help="packed Image")
+    s.set_defaults(fn=cmd_write)
+    s = sub.add_parser("backup", help="copy the main dt and kernel to the backup area")
+    s.add_argument("dev")
+    s.set_defaults(fn=cmd_backup)
+    a = p.parse_args()
+    if not getattr(a, "fn", None):
+        p.print_help()
+        sys.exit(2)
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

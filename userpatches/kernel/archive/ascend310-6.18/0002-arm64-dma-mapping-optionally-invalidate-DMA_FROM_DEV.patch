@@ -1,0 +1,62 @@
+From 011e41d29f055331e461bb7c7e84243d112464f2 Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 12:40:32 +0800
+Subject: [PATCH 2/9] arm64: dma-mapping: optionally invalidate DMA_FROM_DEVICE
+ buffers on map
+
+Cleaning dirty lines at map time corrupts SD reads on the Ascend 310:
+the write-backs reach DRAM after the controller's data. Restore the
+pre-v5.19 invalidate-on-map behaviour behind ARM64_DMA_INVAL_FROM_DEVICE.
+---
+ arch/arm64/Kconfig          | 11 +++++++++++
+ arch/arm64/mm/dma-mapping.c | 12 +++++++++++-
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 2e567a7d8..ad9af8297 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -488,6 +488,17 @@ config AMPERE_ERRATUM_AC04_CPU_23
+ config ARM64_WORKAROUND_CLEAN_CACHE
+ 	bool
+ 
++config ARM64_DMA_INVAL_FROM_DEVICE
++	bool "Invalidate instead of clean when mapping DMA_FROM_DEVICE buffers"
++	help
++	  Since v5.19 buffers mapped for DMA_FROM_DEVICE are cleaned to the
++	  point of coherency before the transfer.  On the HiSilicon Ascend 310
++	  the resulting write-backs can land after the device's data and
++	  corrupt reads from non-coherent masters such as the SD controller.
++	  Say Y here to restore the older invalidate-on-map behaviour.
++
++	  If unsure, say N.
++
+ config ARM64_ERRATUM_826319
+ 	bool "Cortex-A53: 826319: System might deadlock if a write cannot complete until read data is accepted"
+ 	default y
+diff --git a/arch/arm64/mm/dma-mapping.c b/arch/arm64/mm/dma-mapping.c
+index b2b5792b2..d9f3d45df 100644
+--- a/arch/arm64/mm/dma-mapping.c
++++ b/arch/arm64/mm/dma-mapping.c
+@@ -17,7 +17,17 @@ void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
+ {
+ 	unsigned long start = (unsigned long)phys_to_virt(paddr);
+ 
+-	dcache_clean_poc(start, start + size);
++	/*
++	 * On some SoCs (HiSilicon Ascend 310) the write-back of dirty lines
++	 * issued here can reach DRAM after a non-coherent master has stored
++	 * its data, corrupting DMA_FROM_DEVICE buffers.  Discard the lines
++	 * instead, as arm64 did before v5.19.
++	 */
++	if (IS_ENABLED(CONFIG_ARM64_DMA_INVAL_FROM_DEVICE) &&
++	    dir == DMA_FROM_DEVICE)
++		dcache_inval_poc(start, start + size);
++	else
++		dcache_clean_poc(start, start + size);
+ }
+ 
+ void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
+-- 
+2.43.0
+

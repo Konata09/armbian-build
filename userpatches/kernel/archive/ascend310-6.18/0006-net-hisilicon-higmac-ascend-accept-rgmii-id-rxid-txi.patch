@@ -1,0 +1,29 @@
+From 330592b6b15a70ae015d78fb261abef54bd1967a Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 21:33:16 +0800
+Subject: [PATCH 6/9] net: hisilicon: higmac-ascend: accept rgmii-id/rxid/txid
+ interface modes
+
+The PHY supplies the RGMII delays (phy-mode = "rgmii-id"); the MAC port
+setup must still treat these as RGMII instead of falling back to MII 10M.
+---
+ drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+index 3f26443fc..2a782f9c9 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+@@ -619,6 +619,9 @@ STATIC u32 higmac_config_val(phy_interface_t phy_mode, u32 speed)
+ 
+     switch (phy_mode) {
+         case PHY_INTERFACE_MODE_RGMII:
++        case PHY_INTERFACE_MODE_RGMII_ID:
++        case PHY_INTERFACE_MODE_RGMII_RXID:
++        case PHY_INTERFACE_MODE_RGMII_TXID:
+             if (speed == SPEED_1000)
+                 val = RGMII_SPEED_1000;
+             else if (speed == SPEED_100)
+-- 
+2.43.0
+

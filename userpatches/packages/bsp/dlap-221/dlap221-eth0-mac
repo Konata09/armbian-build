@@ -1,0 +1,18 @@
+#!/bin/bash
+# Give eth0 (the GMAC) a fixed random MAC once, with Armbian's generator.
+# The USB Ethernet ports keep the MACs from their EEPROMs.
+# A .link file is used because netplan renders "macaddress" into a .network
+# file, and networkd applies only the first .network file that matches eth0.
+. /usr/lib/armbian/armbian-common
+
+conf=/etc/systemd/network/10-dlap221-eth0.link
+generate_random_mac
+printf '[Match]\nPath=platform-110400000.ethernet\n\n[Link]\nMACAddress=%s\n' "${MACADDR}" > "${conf}.tmp"
+mv -f "${conf}.tmp" "${conf}"
+sync -f "${conf}"
+
+# use the new address now; udev applies the .link file on later boots
+ip link set dev eth0 down
+ip link set dev eth0 address "${MACADDR}"
+ip link set dev eth0 up
+networkctl reconfigure eth0

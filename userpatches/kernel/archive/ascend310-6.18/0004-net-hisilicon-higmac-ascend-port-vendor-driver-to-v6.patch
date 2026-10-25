@@ -1,0 +1,1051 @@
+From 969a3fb93030e6492b3afbfa41f4d1d3db95d59e Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 12:58:48 +0800
+Subject: [PATCH 4/9] net: hisilicon: higmac-ascend: port vendor driver to
+ v6.18
+
+Drop the Ascend SDK dependencies (drv_log, securec, profiling sampler,
+fault manager, EEPROM char device) and the diagnostic RGMII MBIST, take
+the PHY from phy-handle (MDIO is served by the in-tree hns_mdio), map
+the shared system controller without claiming it, and follow the API
+changes since v4.19 (NAPI, tx_timeout, eth_ioctl, skb frags, timers,
+link modes, platform remove).
+---
+ drivers/net/ethernet/hisilicon/Kconfig        |   2 +
+ drivers/net/ethernet/hisilicon/Makefile       |   1 +
+ .../ethernet/hisilicon/higmac-ascend/Kconfig  |  10 +
+ .../ethernet/hisilicon/higmac-ascend/Makefile |   3 +
+ .../ethernet/hisilicon/higmac-ascend/higmac.c | 547 +++---------------
+ .../ethernet/hisilicon/higmac-ascend/higmac.h |   2 +-
+ .../hisilicon/higmac-ascend/higmac_compat.h   |  49 ++
+ 7 files changed, 131 insertions(+), 483 deletions(-)
+ create mode 100644 drivers/net/ethernet/hisilicon/higmac-ascend/Kconfig
+ create mode 100644 drivers/net/ethernet/hisilicon/higmac-ascend/Makefile
+ create mode 100644 drivers/net/ethernet/hisilicon/higmac-ascend/higmac_compat.h
+
+diff --git a/drivers/net/ethernet/hisilicon/Kconfig b/drivers/net/ethernet/hisilicon/Kconfig
+index 38875c196..6aadfbf22 100644
+--- a/drivers/net/ethernet/hisilicon/Kconfig
++++ b/drivers/net/ethernet/hisilicon/Kconfig
+@@ -158,4 +158,6 @@ config HIBMCGE
+ 
+ 	  If you are unsure, say N.
+ 
++source "drivers/net/ethernet/hisilicon/higmac-ascend/Kconfig"
++
+ endif # NET_VENDOR_HISILICON
+diff --git a/drivers/net/ethernet/hisilicon/Makefile b/drivers/net/ethernet/hisilicon/Makefile
+index 0e2cadfea..d20d6af8f 100644
+--- a/drivers/net/ethernet/hisilicon/Makefile
++++ b/drivers/net/ethernet/hisilicon/Makefile
+@@ -10,3 +10,4 @@ obj-$(CONFIG_HNS) += hns/
+ obj-$(CONFIG_HNS3) += hns3/
+ obj-$(CONFIG_HISI_FEMAC) += hisi_femac.o
+ obj-$(CONFIG_HIBMCGE) += hibmcge/
++obj-$(CONFIG_HIGMAC_ASCEND) += higmac-ascend/
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/Kconfig b/drivers/net/ethernet/hisilicon/higmac-ascend/Kconfig
+new file mode 100644
+index 000000000..67bfb583f
+--- /dev/null
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/Kconfig
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++config HIGMAC_ASCEND
++	tristate "HiSilicon Ascend 310 GMAC (higmac) support"
++	depends on ARCH_HISI || COMPILE_TEST
++	depends on OF && HAS_DMA
++	select PHYLIB
++	select MDIO_DEVICE
++	help
++	  RGMII Gigabit Ethernet controller of the HiSilicon Ascend 310
++	  (Hi1910) SoC, ported from the vendor higmac driver.
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/Makefile b/drivers/net/ethernet/hisilicon/higmac-ascend/Makefile
+new file mode 100644
+index 000000000..8ab9020d8
+--- /dev/null
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_HIGMAC_ASCEND) += higmac_ascend.o
++higmac_ascend-objs := higmac.o
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+index b218d9df6..c396f2e27 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+@@ -19,6 +19,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
+ #include <linux/skbuff.h>
++#include <net/gso.h>
+ #include <linux/spinlock.h>
+ #include <linux/mm.h>
+ #include <linux/mii.h>
+@@ -49,13 +50,9 @@
+ #include <linux/reset.h>
+ #include <linux/of_address.h>
+ 
++#include "higmac_compat.h"
+ #include "util.h"
+ #include "higmac.h"
+-#include "drv_profile.h"
+-#include "drv_log.h"
+-#include "devdrv_dfm.h"
+-#include "securec.h"
+-#include "hns_mdio.h"
+ 
+ #define HIGMAC_LOG_PREFIX "higmac"
+ #define higmac_err(fmt...) drv_err(HIGMAC_LOG_PREFIX, fmt)
+@@ -92,7 +89,7 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
+ 
+ struct higmac_rdr_dump_mng rdr_mng = { 0 };
+ 
+-void higmac_dfm_error(const char *err_info, u32 e_id);
++static void higmac_dfm_error(const char *err_info, u32 e_id);
+ 
+ /* *********************** rgmii mbist test ********************** */
+ #define SC_MBIST_CPUI_DATAOUT 0x7500
+@@ -109,7 +106,7 @@ void higmac_dfm_error(const char *err_info, u32 e_id);
+ 
+ static void __iomem *io_sub_sys_base;
+ 
+-void CPUWrite(u32 value)
++static void CPUWrite(u32 value)
+ {
+     u32 i = 0;
+     u32 tmp;
+@@ -132,7 +129,7 @@ void CPUWrite(u32 value)
+     writel_relaxed(0x00, (io_sub_sys_base + SC_MBIST_CPUI_WRITE_EN));
+ }
+ 
+-u32 CPURead(void)
++static u32 CPURead(void)
+ {
+     u32 i = 0;
+     u32 tmp;
+@@ -154,12 +151,12 @@ u32 CPURead(void)
+     return tmp;
+ }
+ 
+-void CPUWait(u32 value)
++static void CPUWait(u32 value)
+ {
+     usleep_range(10 * value, 11 * value);
+ }
+ 
+-void CPUWrite_code(const char *code)
++static void CPUWrite_code(const char *code)
+ {
+     u32 value = 0;
+     u32 i, bit, bit_val, len;
+@@ -174,7 +171,7 @@ void CPUWrite_code(const char *code)
+     CPUWrite(value);
+ }
+ 
+-int CPURead_code(const char *code)
++static int CPURead_code(const char *code)
+ {
+     u32 value = 0;
+     u32 mask_val = 0;
+@@ -208,12 +205,12 @@ int CPURead_code(const char *code)
+     }
+ }
+ 
+-void mbist_rst(u32 rst)
++static void mbist_rst(u32 rst)
+ {
+     writel_relaxed(rst, (io_sub_sys_base + SC_MBIST_CPUI_SMS_FUNC_RESET));
+ }
+ 
+-void mbist_setup(void)
++static void mbist_setup(void)
+ {
+     writel_relaxed(0x1, (io_sub_sys_base + SC_MBIST_CPUI_ENABLE));
+     writel_relaxed(0x0, (io_sub_sys_base + SC_MBIST_CPUI_CLK_SEL));
+@@ -229,7 +226,7 @@ void mbist_setup(void)
+     CPUWait(20);
+ }
+ 
+-int rgmii_mbist(void)
++static int rgmii_mbist(void)
+ {
+     int ret = 0;
+ 
+@@ -364,7 +361,7 @@ int rgmii_mbist(void)
+     return ret;
+ }
+ 
+-int rgmii_mbist_bypass(void)
++static int rgmii_mbist_bypass(void)
+ {
+     int ret = 0;
+ 
+@@ -483,7 +480,12 @@ int rgmii_mbist_bypass(void)
+     return ret;
+ }
+ 
+-int start_mbist(struct higmac_netdev_local *priv, int has_phy)
++static int start_mbist(struct higmac_netdev_local *priv, int has_phy)
++{
++    return 0;
++}
++
++static int __maybe_unused start_mbist_vendor(struct higmac_netdev_local *priv, int has_phy)
+ {
+     int ret;
+ 
+@@ -554,7 +556,7 @@ static void higmac_unreset_macif(struct higmac_netdev_local *priv)
+     writel_relaxed(BIT_SC_MII_RESET_MACIF, priv->sysctrl_base + SC_MII_RESET_DREQ);
+ }
+ 
+-void higmac_mac_core_reset(struct higmac_netdev_local *priv)
++static void higmac_mac_core_reset(struct higmac_netdev_local *priv)
+ {
+     /* undo reset */
+     higmac_unreset_all(priv);
+@@ -569,11 +571,11 @@ void higmac_mac_core_reset(struct higmac_netdev_local *priv)
+     usleep_range(50, 60);
+ }
+ 
+-void higmac_hw_phy_reset(struct higmac_netdev_local *priv)
++static void higmac_hw_phy_reset(struct higmac_netdev_local *priv)
+ {
+ }
+ 
+-void higmac_hw_all_clk_disable(struct higmac_netdev_local *priv)
++static void higmac_hw_all_clk_disable(struct higmac_netdev_local *priv)
+ {
+     /* If macif clock is enabled when suspend, we should
+      * disable it here.
+@@ -1005,7 +1007,7 @@ static void higmac_set_flow_threshold(struct higmac_netdev_local *ld, unsigned i
+     writel(val, ld->gmac_iobase + offset);
+ }
+ 
+-void higmac_set_flow_ctrl_params(struct higmac_netdev_local *ld)
++static void higmac_set_flow_ctrl_params(struct higmac_netdev_local *ld)
+ {
+     unsigned int empty_th = ld->flow_ctrl_active_threshold;
+     unsigned int full_th = ld->flow_ctrl_deactive_threshold;
+@@ -1026,7 +1028,7 @@ void higmac_set_flow_ctrl_params(struct higmac_netdev_local *ld)
+     writel(rec_filter, ld->gmac_iobase + REC_FILT_CONTROL);
+ }
+ 
+-void higmac_set_flow_ctrl_state(struct higmac_netdev_local *ld, int pause)
++static void higmac_set_flow_ctrl_state(struct higmac_netdev_local *ld, int pause)
+ {
+     unsigned int flow_rx_q_en;
+     unsigned int flow;
+@@ -1166,7 +1168,7 @@ static void higmac_reclaim_tx_queue_skb(struct higmac_netdev_local *ld)
+ /* the func stop the hw desc and relaim the software skb resource
+  * before reusing the gmac, you'd better reset the gmac
+  */
+-void higmac_reclaim_rx_tx_resource(struct higmac_netdev_local *ld)
++static void higmac_reclaim_rx_tx_resource(struct higmac_netdev_local *ld)
+ {
+     unsigned long rxflags, txflags;
+     int rd_offset, wr_offset;
+@@ -1234,7 +1236,7 @@ static void higmac_set_multicast_list(struct net_device *dev);
+ static void higmac_hw_set_mac_addr(struct net_device *dev)
+ {
+     struct higmac_netdev_local *priv = netdev_priv(dev);
+-    unsigned char *mac = dev->dev_addr;
++    const unsigned char *mac = dev->dev_addr;
+     u32 val;
+ 
+     val = mac[1] | (mac[0] << 8);
+@@ -1247,7 +1249,7 @@ static void higmac_hw_set_mac_addr(struct net_device *dev)
+ static void higmac_rx_refill(struct higmac_netdev_local *priv);
+ 
+ /* reset and re-config gmac */
+-void higmac_restart(struct higmac_netdev_local *ld)
++static void higmac_restart(struct higmac_netdev_local *ld)
+ {
+     unsigned long rxflags, txflags;
+ 
+@@ -1416,7 +1418,7 @@ STATIC void higmac_update_link(struct higmac_netdev_local *priv)
+     higmac_link_deal(priv, link, speed, duplex, HIGMAC_PAUSE_DEFAULT);
+ }
+ 
+-int higmac_tx_avail(struct higmac_netdev_local *ld)
++static int higmac_tx_avail(struct higmac_netdev_local *ld)
+ {
+     unsigned int tx_bq_wr_offset;
+     unsigned int tx_bq_rd_offset;
+@@ -1601,7 +1603,7 @@ STATIC int higmac_rx_csum_set(struct net_device *dev, struct sk_buff *skb, struc
+     return 0;
+ }
+ 
+-struct sk_buff *higmac_rx_get_skb(struct higmac_netdev_local *ld, u16 skb_id)
++static struct sk_buff *higmac_rx_get_skb(struct higmac_netdev_local *ld, u16 skb_id)
+ {
+     struct sk_buff *skb = NULL;
+     int ret;
+@@ -2272,7 +2274,7 @@ STATIC int higmac_xmit_nfrages_set_bd(struct higmac_netdev_local *ld, struct sk_
+ 
+     for (i = 0; i < nfrags; i++) {
+         skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+-        int len = frag->size;
++        int len = skb_frag_size(frag);
+ 
+         if (!HAS_CAP_CCI(ld->hw_cap)) {
+             dma_addr = skb_frag_dma_map(ld->dev, frag, 0, len, DMA_TO_DEVICE);
+@@ -2289,7 +2291,7 @@ STATIC int higmac_xmit_nfrages_set_bd(struct higmac_netdev_local *ld, struct sk_
+             ld->tx_qmap[desc_pos].frags_dma[i] = dma_addr;
+             ld->tx_qmap[desc_pos].frags_len[i] = len;
+         } else {
+-            phys_addr = page_to_phys(skb_frag_page(frag)) + frag->page_offset;
++            phys_addr = page_to_phys(skb_frag_page(frag)) + skb_frag_off(frag);
+             desc_cur->frags[i].addr = (u32)phys_addr;
+ #if defined(CONFIG_HIGMAC_DDR_64BIT)
+             desc_cur->frags[i].reserved = (phys_addr >> REG_BIT_WIDTH) << SG_DESC_HI8_OFFSET;
+@@ -2555,7 +2557,7 @@ STATIC netdev_tx_t higmac_net_xmit(struct sk_buff *skb, struct net_device *dev)
+     return NETDEV_TX_OK;
+ }
+ 
+-void higmac_enable_napi(struct higmac_netdev_local *priv)
++static void higmac_enable_napi(struct higmac_netdev_local *priv)
+ {
+     struct higmac_napi *q_napi = NULL;
+     int i;
+@@ -2566,7 +2568,7 @@ void higmac_enable_napi(struct higmac_netdev_local *priv)
+     }
+ }
+ 
+-void higmac_disable_napi(struct higmac_netdev_local *priv)
++static void higmac_disable_napi(struct higmac_netdev_local *priv)
+ {
+     struct higmac_napi *q_napi = NULL;
+     int i;
+@@ -2634,7 +2636,7 @@ STATIC int higmac_net_close(struct net_device *dev)
+ {
+     struct higmac_netdev_local *ld = netdev_priv(dev);
+ 
+-    del_timer_sync(&ld->service_timer);
++    timer_delete_sync(&ld->service_timer);
+ 
+     higmac_irq_disable_all_queue(ld);
+     higmac_port_disable(ld);
+@@ -2659,7 +2661,7 @@ STATIC int higmac_net_close(struct net_device *dev)
+     return 0;
+ }
+ 
+-STATIC void higmac_net_timeout(struct net_device *dev)
++STATIC void higmac_net_timeout(struct net_device *dev, unsigned int txqueue)
+ {
+     int ret;
+ 
+@@ -3011,9 +3013,9 @@ STATIC int higmac_set_pauseparam(struct net_device *net_dev, struct ethtool_paus
+     higmac_set_flow_ctrl_state(ld, ld->old_pause);
+ 
+     if (phy != NULL) {
+-        phy->advertising &= ~SUPPORTED_Pause;
++        linkmode_clear_bit(ETHTOOL_LINK_MODE_Pause_BIT, phy->advertising);
+         if (ld->flow_ctrl)
+-            phy->advertising |= SUPPORTED_Pause;
++            linkmode_set_bit(ETHTOOL_LINK_MODE_Pause_BIT, phy->advertising);
+         if (phy->autoneg && netif_running(net_dev))
+             return phy_start_aneg(phy);
+     }
+@@ -3111,9 +3113,8 @@ static const struct net_device_ops hieth_netdev_ops = {
+     .ndo_set_rx_mode = higmac_set_multicast_list,
+     .ndo_set_features = higmac_set_features,
+     .ndo_set_mac_address = higmac_net_set_mac_address,
+-    .ndo_change_mtu = eth_change_mtu,
+     .ndo_get_stats = higmac_net_get_stats,
+-    .ndo_do_ioctl = higmac_net_ioctl,
++    .ndo_eth_ioctl = higmac_net_ioctl,
+ };
+ 
+ static int higmac_of_get_param(struct higmac_netdev_local *ld, struct device_node *node)
+@@ -3265,7 +3266,7 @@ STATIC int higmac_init_hw_desc_queue(struct higmac_netdev_local *priv)
+     return -ENOMEM;
+ }
+ 
+-void higmac_init_napi(struct higmac_netdev_local *priv)
++static void higmac_init_napi(struct higmac_netdev_local *priv)
+ {
+     struct higmac_napi *q_napi = NULL;
+     int i;
+@@ -3274,11 +3275,11 @@ void higmac_init_napi(struct higmac_netdev_local *priv)
+         q_napi = &priv->q_napi[i];
+         q_napi->rxq_id = i;
+         q_napi->ndev_priv = priv;
+-        netif_napi_add(priv->netdev, &q_napi->napi, higmac_poll, NAPI_POLL_WEIGHT);
++        netif_napi_add(priv->netdev, &q_napi->napi, higmac_poll);
+     }
+ }
+ 
+-void higmac_destroy_napi(struct higmac_netdev_local *priv)
++static void higmac_destroy_napi(struct higmac_netdev_local *priv)
+ {
+     struct higmac_napi *q_napi = NULL;
+     int i;
+@@ -3289,7 +3290,7 @@ void higmac_destroy_napi(struct higmac_netdev_local *priv)
+     }
+ }
+ 
+-int higmac_request_irqs(struct platform_device *pdev, struct higmac_netdev_local *priv)
++static int higmac_request_irqs(struct platform_device *pdev, struct higmac_netdev_local *priv)
+ {
+     struct device *dev = priv->dev;
+     int ret;
+@@ -3360,7 +3361,7 @@ static void higmac_nic_features(struct higmac_netdev_local *priv)
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+ STATIC void higmac_service_timer(struct timer_list *t)
+ {
+-    struct higmac_netdev_local *priv = from_timer(priv, t, service_timer);
++    struct higmac_netdev_local *priv = timer_container_of(priv, t, service_timer);
+ #else
+ STATIC void higmac_service_timer(unsigned long data)
+ {
+@@ -3685,9 +3686,6 @@ static void higmac_phy_unfixups(void)
+ 
+ STATIC int higmac_phy_config(struct higmac_netdev_local *priv)
+ {
+-    struct mii_bus *mdio_bus = NULL;
+-    int ret;
+-
+     if (priv->phy_node != NULL) {
+         start_mbist(priv, 1);
+         /* register phy fixup */
+@@ -3701,28 +3699,8 @@ STATIC int higmac_phy_config(struct higmac_netdev_local *priv)
+             return -EPROBE_DEFER;
+         }
+     } else {
+-        mdio_bus = hns_get_mdiobus();
+-        if (mdio_bus == NULL) {
+-            higmac_err("hns_get_mdiobus failed.\n");
+-            return -ENODEV;
+-        }
+-        priv->phy = phy_find_first(mdio_bus);
+-        if (priv->phy == NULL) {
+-            start_mbist(priv, 0);
+-            priv->cfg_speed = SPEED_1000;
+-            priv->cfg_duplex = 1;
+-            higmac_info("No phy found or using lan switch\n");
+-            return 0;
+-        }
+-        higmac_info("find phy success without dts\n");
+-        start_mbist(priv, 1);
+-        /* register phy fixup */
+-        higmac_phy_fixups(priv);
+-        ret = phy_connect_direct(priv->netdev, priv->phy, higmac_adjust_link, priv->phy_mode);
+-        if (ret) {
+-            higmac_phy_unfixups();
+-            return ret;
+-        }
++        higmac_err("no phy-handle in the device tree.\n");
++        return -ENODEV;
+     }
+     higmac_info("phy(id=0x%x) connetc ok.\n", priv->phy->phy_id);
+ 
+@@ -3739,14 +3717,12 @@ STATIC int higmac_phy_init(struct higmac_netdev_local *priv, struct device_node
+ {
+     int ret;
+ 
+-    ret = of_get_phy_mode(node);
++    ret = of_get_phy_mode(node, &priv->phy_mode);
+     if (ret < 0) {
+         higmac_err("not find phy-mode. whether has phy or not, tell me the mode.");
+         return -EINVAL;
+     }
+ 
+-    priv->phy_mode = ret;
+-
+     higmac_info("phy mode = %d.\n", priv->phy_mode);
+ 
+     priv->phy_node = of_parse_phandle(node, "phy-handle", 0);
+@@ -3757,19 +3733,12 @@ STATIC int higmac_phy_init(struct higmac_netdev_local *priv, struct device_node
+ 
+     if (priv->phy != NULL) {
+         /* Stop Advertising 1000BASE Capability if interface is not RGMII */
+-        if ((priv->phy_mode == PHY_INTERFACE_MODE_MII) || (priv->phy_mode == PHY_INTERFACE_MODE_RMII)) {
+-            priv->phy->advertising &= ~(SUPPORTED_1000baseT_Half | SUPPORTED_1000baseT_Full);
+-
+-            /* Internal FE phy's reg BMSR bit8 is wrong, make the kernel
+-             * believe it has the 1000base Capability, so fix it here
+-             */
+-            if (priv->phy->phy_id == HISILICON_PHY_ID_FESTAV200)
+-                priv->phy->supported &= ~(ADVERTISED_1000baseT_Full | ADVERTISED_1000baseT_Half);
+-        }
++        if ((priv->phy_mode == PHY_INTERFACE_MODE_MII) || (priv->phy_mode == PHY_INTERFACE_MODE_RMII))
++            phy_set_max_speed(priv->phy, SPEED_100);
+ 
+-        priv->phy->supported |= SUPPORTED_Pause;
++        linkmode_set_bit(ETHTOOL_LINK_MODE_Pause_BIT, priv->phy->supported);
+         if (priv->flow_ctrl)
+-            priv->phy->advertising |= SUPPORTED_Pause;
++            linkmode_set_bit(ETHTOOL_LINK_MODE_Pause_BIT, priv->phy->advertising);
+ 
+         set_bit(SERVICE_STATE_LINK_CLOSE, &priv->service_state);
+ 
+@@ -3789,329 +3758,27 @@ static void higmac_phy_uninit(struct higmac_netdev_local *priv)
+         of_node_put(priv->phy_node);
+ }
+ 
+-struct higmac_sample {
+-    struct net_device *ndev;
+-    struct net_device_stats stats_bak;
+-    struct timespec64 last_ktime;
+-};
+-
+-struct higmac_sample *sample_priv = NULL;
+-
+-static struct {
+-    const char str[SAMPLE_NAME_MAX];
+-} higmac_sample_names[] = {
+-    { "bandwidth" },
+-
+-    { "rxPacket/s" },
+-    { "rxByte/s" },
+-    { "rxPackets" },
+-    { "rxBytes" },
+-    { "rxErrors" },
+-    { "rxDropped" },
+-
+-    { "txPacket/s" },
+-    { "txByte/s" },
+-    { "txPackets" },
+-    { "txBytes" },
+-    { "txErrors" },
+-    { "txDropped" }
+-};
+-
+-static int sample_max_len(int max, int currunt)
++static int higmac_sample_init(struct net_device *ndev)
+ {
+-    return (max > currunt) ? (max - currunt) : 0;
+-}
+-
+-static int sample_timestamp(char *buf, int len, struct timespec64 *uptime)
+-{
+-    int wlen = 0;
+-    int tlen;
+-
+-    tlen = snprintf_s(buf, len, len - 1, "%ld:%09ld", (long int)uptime->tv_sec, (long int)uptime->tv_nsec);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    return wlen;
+-}
+-
+-static int higmac_sample_header(void *buf, int len)
+-{
+-    int num = ARRAY_SIZE(higmac_sample_names);
+-    int wlen = 0;
+-    int tlen;
+-    int remain_len;
+-    int i;
+-
+-    for (i = 0; i < num; i++) {
+-        remain_len = sample_max_len(len, wlen);
+-        tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %s", higmac_sample_names[i].str);
+-        if (tlen > 0) {
+-            wlen += tlen;
+-        }
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, "\n");
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    return wlen;
+-}
+-
+-static int higmac_sample_rx(struct net_device_stats *stats, char *buf, int len, long pps, long Bps)
+-{
+-    int wlen = 0;
+-    int tlen;
+-    int remain_len = 0;
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", pps);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", Bps);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->rx_packets);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->rx_bytes);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->rx_errors);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->rx_dropped);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    return wlen;
+-}
+-
+-static int higmac_sample_tx(struct net_device_stats *stats, char *buf, int len, long pps, long Bps)
+-{
+-    int wlen = 0;
+-    int tlen;
+-    int remain_len = 0;
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", pps);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", Bps);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->tx_packets);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->tx_bytes);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->tx_errors);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %ld", stats->tx_dropped);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    return wlen;
+-}
+-
+-int higmac_sample_fun(unsigned int device_id, void *buf, int len, int flag)
+-{
+-    struct net_device_stats *stats = NULL, *last_stats = NULL;
+-    struct higmac_netdev_local *priv = NULL;
+-    struct higmac_sample *sample = NULL;
+-    struct timespec64 uptime;
+-    long rxpps, txpps;
+-    long rxBps, txBps;
+-    int bandwidth;
+-    u64 last_ns;
+-    int wlen = 0;
+-    int tlen;
+-    int remain_len = 0;
+-
+-    if ((buf == NULL) || (len <= 0)) {
+-        higmac_err("nic sample param error, buf %pK, len %d\n", buf, len);
+-        return 0;
+-    }
+-
+-    sample = (struct higmac_sample *)sample_priv;
+-    if (sample == NULL) {
+-        higmac_warn("nic profile has not initialized.\n");
+-        return 0;
+-    }
+-
+-    getrawmonotonic64(&uptime);
+-
+-    if (unlikely(((unsigned int)flag & SAMPLE_MASK) == SAMPLE_WITH_HEADER)) {
+-        wlen += sample_timestamp(buf + wlen, len - wlen, &uptime);
+-        wlen += higmac_sample_header(buf + wlen, len - wlen);
+-    }
+-
+-    last_ns = (u64)timespec64_to_ns(&uptime) - (u64)timespec64_to_ns(&sample->last_ktime);
+-    if (!last_ns)
+-        return wlen;
+-
+-    stats = &sample->ndev->stats;
+-    last_stats = &sample->stats_bak;
+-
+-    rxpps = (stats->rx_packets - last_stats->rx_packets) * NSEC_PER_SEC / last_ns;
+-    txpps = (stats->tx_packets - last_stats->tx_packets) * NSEC_PER_SEC / last_ns;
+-
+-    rxBps = (stats->rx_bytes - last_stats->rx_bytes) * NSEC_PER_SEC / last_ns;
+-    txBps = (stats->tx_bytes - last_stats->tx_bytes) * NSEC_PER_SEC / last_ns;
+-
+-    last_stats->rx_packets = stats->rx_packets;
+-    last_stats->tx_packets = stats->tx_packets;
+-    last_stats->rx_bytes = stats->rx_bytes;
+-    last_stats->tx_bytes = stats->tx_bytes;
+-    sample->last_ktime = uptime;
+-
+-    priv = netdev_priv(sample->ndev);
+-    if (priv->old_speed == SPEED_10)
+-        bandwidth = 10;
+-    else if (priv->old_speed == SPEED_100)
+-        bandwidth = 100;
+-    else
+-        bandwidth = 1000;
+-
+-    /* timestamp */
+-    wlen += sample_timestamp(buf + wlen, len - wlen, &uptime);
+-
+-    /* bandwidth */
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, " %d", bandwidth);
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    /* rx */
+-    wlen += higmac_sample_rx(stats, buf + wlen, len - wlen, rxpps, rxBps);
+-
+-    /* tx */
+-    wlen += higmac_sample_tx(stats, buf + wlen, len - wlen, txpps, txBps);
+-
+-    /* finish */
+-    remain_len = sample_max_len(len, wlen);
+-    tlen = snprintf_s(buf + wlen, remain_len, remain_len - 1, "\n");
+-    if (tlen > 0) {
+-        wlen += tlen;
+-    }
+-
+-    if (wlen < len) {
+-        ((char *)buf)[wlen] = '\0';
+-    } else {
+-        ((char *)buf)[len - 1] = '\0';
+-    }
+-
+-    return wlen;
+-}
+-
+-EXPORT_SYMBOL(higmac_sample_fun);
+-
+-STATIC int higmac_sample_init(struct net_device *ndev)
+-{
+-    sample_priv = (struct higmac_sample *)kzalloc(sizeof(struct higmac_sample), GFP_KERNEL);
+-    if (sample_priv == NULL) {
+-        higmac_err("profile register kzalloc failed.\n");
+-        return -ENOMEM;
+-    }
+-
+-    sample_priv->ndev = ndev;
+-    getrawmonotonic64(&sample_priv->last_ktime);
+-
+     return 0;
+ }
+ 
+-STATIC void higmac_sample_uninit(void)
+-{
+-    if (sample_priv != NULL)
+-        kfree(sample_priv);
+-    sample_priv = NULL;
+-}
+-
+-void higmac_dump(u32 excep_id, u32 etype, u32 module_id, char **black_box_info)
++static void higmac_sample_uninit(void)
+ {
+-    if (black_box_info != NULL)
+-        *black_box_info = rdr_mng.buffer;
+-    return;
+ }
+ 
+-void higmac_dfm_error(const char *err_info, u32 e_id)
++static void higmac_dfm_error(const char *err_info, u32 e_id)
+ {
+-    dfm_write_black_box(DFM_MODULE_ID_DRIVER, DFM_SUBMODULE_ID_NET, err_info);
+-    dfm_system_error_report(e_id, 0);
++    higmac_err("hw error 0x%x: %s\n", e_id, err_info);
+ }
+ 
+ STATIC int higmac_dfm_init(void)
+ {
+-    struct dfm_module_register dfm_higmac_info = {0};
+-    char *mng = NULL;
+-
+-    dfm_higmac_info.module_id = DFM_MODULE_ID_DRIVER;
+-    dfm_higmac_info.sub_module_id = DFM_SUBMODULE_ID_NET;
+-    dfm_higmac_info.ops_dump = &higmac_dump;
+-
+-    if (dfm_register_module(&dfm_higmac_info)) {
+-        higmac_err("dfm_register_module failed.\n");
+-        return -1;
+-    }
+-
+-    mng = (char *)kzalloc(HIGMAC_DFM_BUF_LEN, GFP_KERNEL);
+-    if (mng == NULL) {
+-        higmac_err("register kzalloc failed.\n");
+-        dfm_unregister_module(DFM_MODULE_ID_DRIVER, DFM_SUBMODULE_ID_NET);
+-        return -ENOMEM;
+-    }
+-
+-    rdr_mng.buffer = mng;
+-    rdr_mng.buf_len = HIGMAC_DFM_BUF_LEN;
+-
+     return 0;
+ }
+ 
+ STATIC void higmac_dfm_uninit(void)
+ {
+-    dfm_unregister_module(DFM_MODULE_ID_DRIVER, DFM_SUBMODULE_ID_NET);
+-
+-    kfree(rdr_mng.buffer);
+-
+-    rdr_mng.buffer = NULL;
+-    rdr_mng.buf_len = 0;
+ }
+ 
+ STATIC int higmac_others_init(struct net_device *ndev)
+@@ -4138,96 +3805,9 @@ STATIC int higmac_others_init(struct net_device *ndev)
+     return 0;
+ }
+ 
+-STATIC int higmac_eeprom_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++static void higmac_mac_init(struct net_device *ndev, struct device_node *node)
+ {
+-    mm_segment_t old_fs;
+-    int ret = -ENOTTY;
+-
+-    if (!file || !file->f_op || !file->f_op->unlocked_ioctl) {
+-        higmac_err("eeprom ioctl is NULL.\n");
+-        goto out;
+-    }
+-
+-    old_fs = get_fs();
+-    set_fs(get_ds()); /* lint !e501 */ /* kernel source */
+-
+-    ret = file->f_op->unlocked_ioctl(file, cmd, arg);
+-
+-    set_fs(old_fs);
+-out:
+-    return ret;
+-}
+-
+-STATIC int higmac_get_mac_in_eeprom(char *mac_addr)
+-{
+-    unsigned char mac[ETH_ALEN];
+-    struct eeprom_info einfo;
+-    struct file *file = NULL;
+-    int readlen;
+-
+-    file = filp_open(EEPROM_NAME, O_RDWR | O_NDELAY, 0);
+-    if (IS_ERR(file)) {
+-        higmac_warn("eeprom file (%s) not existed.\n", EEPROM_NAME);
+-        return -1;
+-    }
+-
+-    einfo.buf = (unsigned long)(uintptr_t)mac;
+-    einfo.count = ETH_ALEN;
+-    einfo.page_address = EEPROM_MAC_OFFSET + EEPROM_MAC_MAC_OFFSET;
+-
+-    readlen = higmac_eeprom_ioctl(file, EEPROM_READ_CMD, (unsigned long)(uintptr_t)&einfo);
+-    if (ETH_ALEN != readlen) {
+-        higmac_err("read eeprom by ioctl failed. readlen = %d\n", readlen);
+-        filp_close(file, NULL);
+-        file = NULL;
+-        return -1;
+-    }
+-
+-    mac_addr[0] = mac[0];
+-    mac_addr[1] = mac[1];
+-    mac_addr[2] = mac[2];
+-    mac_addr[3] = mac[3];
+-    mac_addr[4] = mac[4];
+-    mac_addr[5] = mac[5];
+-
+-    filp_close(file, NULL);
+-    file = NULL;
+-    return 0;
+-}
+-
+-/*
+- * char *mac_addr : write mac addr(6 bytes) to this buffer
+- */
+-STATIC int higmac_get_mac_from_user(struct device_node *node, char *mac_addr)
+-{
+-    int mac_where;
+-
+-    if (of_property_read_u32_index(node, "mac-where", 0, &mac_where)) {
+-        higmac_warn("mac-where node is not setted.\n");
+-        return -1;
+-    }
+-
+-    if (MAC_IN_EEPROM == mac_where)
+-        return higmac_get_mac_in_eeprom(mac_addr);
+-
+-    /* others cases by user */
+-    return -1;
+-}
+-
+-void higmac_mac_init(struct net_device *ndev, struct device_node *node)
+-{
+-    const char *mac_addr = NULL;
+-
+-    /* 1. read user's mac addr */
+-    if (higmac_get_mac_from_user(node, ndev->dev_addr)) {
+-        /* 2. get mac by dts */
+-        mac_addr = of_get_mac_address(node);
+-        if (mac_addr != NULL)
+-            ether_addr_copy(ndev->dev_addr, mac_addr);
+-    }
+-
+-    if (!is_valid_ether_addr(ndev->dev_addr)) {
+-        /* 3. set mac with random */
++    if (of_get_ethdev_address(node, ndev) || !is_valid_ether_addr(ndev->dev_addr)) {
+         eth_hw_addr_random(ndev);
+         higmac_warn("using random MAC\n");
+     }
+@@ -4290,7 +3870,7 @@ STATIC void higmac_others_uninit(void)
+     higmac_dfm_uninit();
+ }
+ 
+-struct net_device *higmac_alloc_ndev_and_resource(struct platform_device *pdev, struct higmac_netdev_local **ld)
++static struct net_device *higmac_alloc_ndev_and_resource(struct platform_device *pdev, struct higmac_netdev_local **ld)
+ {
+     struct device *dev = &pdev->dev;
+     struct device_node *node = dev->of_node;
+@@ -4349,8 +3929,11 @@ struct net_device *higmac_alloc_ndev_and_resource(struct platform_device *pdev,
+ 
+     higmac_info("nic rgmii iobase resource ok.\n");
+ 
++    /* the system controller is shared with other drivers: map, don't claim */
+     res = platform_get_resource(pdev, IORESOURCE_MEM, MEM_SYSCTRL_IOBASE);
+-    priv->sysctrl_base = devm_ioremap_resource(dev, res);
++    priv->sysctrl_base = res ? devm_ioremap(dev, res->start, resource_size(res)) : NULL;
++    if (!priv->sysctrl_base)
++        priv->sysctrl_base = IOMEM_ERR_PTR(-ENOMEM);
+     if (IS_ERR(priv->sysctrl_base)) {
+         higmac_err("nic sysctrl iobase resource failed! ret=%ld\n", PTR_ERR(priv->sysctrl_base));
+         goto out_free_netdev;
+@@ -4551,7 +4134,7 @@ STATIC int higmac_dev_probe(struct platform_device *pdev)
+     return ret;
+ }
+ 
+-STATIC int higmac_dev_remove(struct platform_device *pdev)
++STATIC void higmac_dev_remove(struct platform_device *pdev)
+ {
+     struct net_device *ndev = platform_get_drvdata(pdev);
+     struct higmac_netdev_local *priv = netdev_priv(ndev);
+@@ -4595,7 +4178,7 @@ STATIC int higmac_dev_remove(struct platform_device *pdev)
+ 
+     higmac_info("higmac driver remove successful.\n");
+ 
+-    return 0;
++    return;
+ }
+ 
+ #ifdef CONFIG_PM
+@@ -4616,7 +4199,7 @@ static void higmac_enable_irq(struct higmac_netdev_local *priv)
+         enable_irq(priv->irq[i]);
+ }
+ 
+-int higmac_dev_suspend(struct platform_device *pdev, pm_message_t state)
++static int higmac_dev_suspend(struct platform_device *pdev, pm_message_t state)
+ {
+     struct net_device *ndev = platform_get_drvdata(pdev);
+     struct higmac_netdev_local *priv = netdev_priv(ndev);
+@@ -4628,7 +4211,7 @@ int higmac_dev_suspend(struct platform_device *pdev, pm_message_t state)
+     if (!priv->wol_enable && (priv->phy != NULL))
+         phy_disconnect(priv->phy);
+ 
+-    del_timer_sync(&priv->service_timer);
++    timer_delete_sync(&priv->service_timer);
+     cancel_work_sync(&priv->service_task);
+ 
+     /* If suspend when netif is not up, the napi_disable will run into
+@@ -4667,7 +4250,7 @@ int higmac_dev_suspend(struct platform_device *pdev, pm_message_t state)
+ }
+ EXPORT_SYMBOL(higmac_dev_suspend);
+ 
+-int higmac_dev_resume(struct platform_device *pdev)
++static int higmac_dev_resume(struct platform_device *pdev)
+ {
+     struct net_device *ndev = platform_get_drvdata(pdev);
+     struct higmac_netdev_local *priv = netdev_priv(ndev);
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
+index 4fcae653a..24efcea5b 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
+@@ -27,7 +27,7 @@
+ 
+ #include "rgmii_reg_offset.h"
+ 
+-#define STATIC
++#define STATIC static
+ 
+ #define HIGMAC_DFM_BUF_LEN (1024 * 2)
+ 
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac_compat.h b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac_compat.h
+new file mode 100644
+index 000000000..cd8187dbc
+--- /dev/null
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac_compat.h
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Stand-ins for the Ascend driver SDK helpers (drv_log, securec) used by the
++ * vendor higmac driver, so it builds as a normal in-tree driver.
++ */
++#ifndef __HIGMAC_COMPAT_H__
++#define __HIGMAC_COMPAT_H__
++
++#include <linux/kernel.h>
++#include <linux/minmax.h>
++#include <linux/printk.h>
++#include <linux/string.h>
++
++#define CFG_SOC_PLATFORM_MINI
++
++#define EOK 0
++
++#define drv_err(mod, fmt, ...)	pr_err("%s: " fmt, mod, ##__VA_ARGS__)
++#define drv_warn(mod, fmt, ...)	pr_warn("%s: " fmt, mod, ##__VA_ARGS__)
++#define drv_info(mod, fmt, ...)	pr_info("%s: " fmt, mod, ##__VA_ARGS__)
++#define drv_debug(mod, fmt, ...) pr_debug("%s: " fmt, mod, ##__VA_ARGS__)
++
++static inline int memcpy_s(void *dest, size_t dest_max, const void *src,
++			   size_t count)
++{
++	if (count > dest_max)
++		return -EINVAL;
++	memcpy(dest, src, count);
++	return 0;
++}
++
++static inline int strncpy_s(char *dest, size_t dest_max, const char *src,
++			    size_t count)
++{
++	if (!dest_max)
++		return -EINVAL;
++	strscpy(dest, src, min(dest_max, count + 1));
++	return 0;
++}
++
++/* securec semantics: write at most @count chars, -1 on truncation */
++#define snprintf_s(buf, dest_max, count, fmt, ...)			\
++	({								\
++		size_t __lim = min_t(size_t, (dest_max), (count) + 1);	\
++		int __n = snprintf((buf), __lim, fmt, ##__VA_ARGS__);	\
++		(__n < 0 || (size_t)__n >= __lim) ? -1 : __n;		\
++	})
++
++#endif
+-- 
+2.43.0
+
