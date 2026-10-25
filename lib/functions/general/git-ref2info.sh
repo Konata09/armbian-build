@@ -37,6 +37,7 @@ function git_remote_url_for_mirror() {
 # This works under memoize-cached.sh::run_memoized() -- which is full of tricks.
 # Nested functions are used because the source of the momoized function is used as part of the cache hash.
 function memoized_git_ref_to_info() {
+	# shellcheck disable=SC2178 # nope, that's a nameref.
 	declare -n MEMO_DICT="${1}" # nameref
 	declare ref_type ref_name
 	declare -a refs_to_try=()
@@ -223,7 +224,7 @@ function memoized_git_ref_to_info() {
 					esac
 					;;
 
-				"https://gitlab.com/"* | "https://source.denx.de/"* | "https://gitlab.collabora.com/"*)
+				"https://gitlab.com/"* | "https://git.u-boot-project.org/"* | "https://source.denx.de/"* | "https://gitlab.collabora.com/"*)
 					# GitLab is more complex than GitHub, there can be more levels.
 					# This code is incomplete... but it works for now.
 					# Example: input:  https://gitlab.com/rk3588_linux/rk/kernel.git
