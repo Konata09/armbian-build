@@ -14,9 +14,29 @@ for RK3308:
 - b@1,3ghz, bs, bs-1.3ghz, otg-host, uart1, uart2, uart3, s0-ext-antenna
 
 for RK3566:
-- eltay-rm66-pocketterm35-touch-5d
+- eltay-rm66-pdm, eltay-rm66-pocketterm35-touch-5d
 
 ### Overlay details:
+
+### rk3566-eltay-rm66-pdm
+
+Enables two-channel PDM microphone capture on ELTAY RM66.
+The sound card name is "ELTAY RM66 PDM".
+
+- Clock: GPIO3_D6.
+- Data: GPIO3_D7, SDI0.
+
+UART1 mux1 shares these pins. Do not enable both functions.
+
+With `overlay_prefix=rockchip`, add this entry to `/boot/armbianEnv.txt`:
+
+```
+overlays=rk3566-eltay-rm66-pdm
+```
+
+With another prefix, use `overlays=rockchip-rk3566-eltay-rm66-pdm`.
+Append the name if `overlays` is already set.
+Reboot after saving the changes.
 
 ### rk3566-eltay-rm66-pocketterm35-touch-5d
 
@@ -366,3 +386,36 @@ damage that may occur when using most common or aggresive fans that have bigger 
 However this overlay allow set back to the pwm default, which is useful and even required when 
 you use some low power high tech fans (like Sunon Vapo-Bearing). This overlay also set the cooling 
 duty cycle a bit higher as these fan have smaller cooling power and also make quiet fans more quieter(The fan design is counterintuitive.).
+
+**********************************
+Details for DshanPi R1 overlays  (02 Oct 2026):
+
+### rockchip-rk3568-dshanpi-r1-disable-pcie
+Disables both PCIe root complexes on DshanPi R1 / R1+.
+The overlay also disables any card in the E-key slot.
+Use the overlay only when both M.2 slots are empty.
+An unused mainline PCIe PHY draws about 0.6 W.
+**********************************
+Details for OrangePi CM5 overlays  (28 10 2026):
+
+### rockchip-rk3588-orangepi-cm5-cam1
+Enables CAM1 CSI interface.
+
+**********************************
+Details for Orange Pi 5 Max overlays  (29 Oct 2026):
+
+### rockchip-rk3588-orangepi-5-max-ap6611s
+Enables the onboard AP6611S (Synaptics SYN43711) WiFi on SDIO.
+The overlay switches the SDIO controller to the sdiom0 pins.
+It powers the module through an mmc-pwrseq-simple on WL_REG_ON (GPIO2_C5).
+The 32.768 kHz LPO comes from the hym8563.
+The "android,bcmdhd_wlan" node gives the driver its host-wake interrupt (GPIO0_B0).
+Needs a bcmdhd-sdio-dkms release with the changes from https://github.com/armbian/bcmdhd-dkms/pull/15.
+They enable CONFIG_BCMDHD_DTS and fix the Linux 7.3 build, duplicate cipher suites and firmware paths.
+With 101.10.591.52.27-10 or older, the driver gets no host-wake interrupt and WiFi stays down.
+
+With `overlay_prefix=rockchip-rk3588`, add this entry to `/boot/armbianEnv.txt`:
+
+```
+overlays=orangepi-5-max-ap6611s
+```

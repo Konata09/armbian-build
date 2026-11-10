@@ -13,7 +13,9 @@ BOOTSCRIPT='boot-rockchip64.cmd:boot.cmd'
 BOOTENV_FILE='rockchip64.txt'
 UBOOT_TARGET_MAP=";;idbloader.bin uboot.img trust.bin"
 BOOTDELAY=0
-OVERLAY_PREFIX="${OVERLAY_PREFIX:-"rockchip"}" # default to 'rockchip' if not set by board
+# OVERLAY_PREFIX is a space-separated list. The boot script tries each prefix in order.
+# It defaults to the SoC prefixes (see rockchip_soc_overlay_prefixes below) if not set by board.
+# Boards add their own prefixes in OVERLAY_PREFIX_BOARD; see do_main_configuration in lib/functions/configuration/main-config.sh.
 OVERLAY_DIR="/boot/dtb/rockchip/overlay"
 # SERIALCON is handled/defaulted in hook post_family_config__900_late_default_serial_console_by_branch at end of this file
 GOVERNOR="ondemand"
@@ -81,6 +83,22 @@ if [[ "a${BOOT_SOC}a" == "aa" ]]; then
 else
 	display_alert "Determined BOOT_SOC from BOOTCONFIG" "BOOT_SOC: '${BOOT_SOC}'; BOOTCONFIG: '${BOOTCONFIG}'" "info"
 fi
+
+# Print the overlay prefixes of a SoC: "<base><soc>". RK3566 and RK3568 share most overlays, so each gets both.
+# $1: base ("rockchip-" for mainline overlays, "" for vendor overlays); $2: SoC, default BOOT_SOC or the BOOT_FDT_FILE SoC.
+function rockchip_soc_overlay_prefixes() {
+	declare base="${1}" soc="${2:-${BOOT_SOC:-$(basename "${BOOT_FDT_FILE:-none}" | cut -d- -f1)}}"
+	case "${soc}" in
+		rk3566) echo "${base}rk3566 ${base}rk3568" ;;
+		rk3568) echo "${base}rk3568 ${base}rk3566" ;;
+		rk3399pro) echo "${base}rk3399" ;;
+		rk3588s) echo "${base}rk3588" ;;
+		rk[0-9]*) echo "${base}${soc}" ;;
+		*) echo "rockchip" ;;
+	esac
+}
+
+OVERLAY_PREFIX="${OVERLAY_PREFIX:-"$(rockchip_soc_overlay_prefixes "rockchip-")"}"
 
 CPUMIN=${CPUMIN:="408000"}
 
@@ -382,8 +400,14 @@ write_uboot_platform_ufs() {
 	fi
 }
 
+# $5: the image to write. armbian-install selects it from BOOTLOADER_MTD_IMAGE(_SATA).
+# Without $5, write the only image, or ask in a dialog.
 write_uboot_platform_mtd() {
-	FILES=$(find "$1" -maxdepth 1 -type f \( -name "rkspi_loader*.img" -o -name "u-boot-rockchip-spi*.bin" \))
+	if [[ -n "${5:-}" ]]; then
+		FILES="$5"
+	else
+		FILES=$(find "$1" -maxdepth 1 -type f \( -name "rkspi_loader*.img" -o -name "u-boot-rockchip-spi*.bin" \))
+	fi
 	if [ -z "$FILES" ]; then
 		echo "No SPI image found."
 		exit 1

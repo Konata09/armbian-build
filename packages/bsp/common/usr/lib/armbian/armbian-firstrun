@@ -33,8 +33,47 @@ set_new_hostname() {
 		/etc/hosts
 }
 
+# Apply the tuning profile that the build selected (TUNING_PROFILE). armbian-config
+# replaces PENDING= with PROFILE= on success. Returns 1 only when the apply fails.
+apply_tuning_profile() {
+	local profile
+	profile=$(sed -n 's/^PENDING=//p' /etc/default/armbian-tuning-profile 2>/dev/null)
+	[[ -n "${profile}" ]] && command -v armbian-config > /dev/null 2>&1 || return 0
+	if armbian-config --api module_tuning_profile apply "${profile}" >> ${Log} 2>&1; then
+		echo -e "\n### [firstrun] Applied tuning profile ${profile}" >>${Log}
+	else
+		echo -e "\n### [firstrun] Tuning profile ${profile} failed" >>${Log}
+		return 1
+	fi
+}
+
+# Refresh grub.cfg: 98-armbian.cfg picks the menu font for the panel of this machine.
+# The GPU driver must be up first, so wait for udev. Returns 1 only when update-grub fails.
+refresh_grub_font() {
+	[[ -f /boot/grub/fonts/armbian-hidpi.pf2 ]] && command -v update-grub > /dev/null 2>&1 || return 0
+	udevadm settle --timeout=30 2> /dev/null
+	if update-grub >> ${Log} 2>&1; then
+		echo -e "\n### [firstrun] Refreshed the GRUB menu font" >>${Log}
+	else
+		echo -e "\n### [firstrun] update-grub failed" >>${Log}
+		return 1
+	fi
+}
+
+# Mark a completed first run whose tuning profile or GRUB refresh failed.
+PROFILE_RETRY=/var/lib/armbian/firstrun-profile-retry
+GRUB_RETRY=/var/lib/armbian/firstrun-grub-retry
+
 case "$1" in
 	start)
+
+	# The first run is done except the tuning profile or the GRUB refresh. Retry only these.
+	if [[ -f "${PROFILE_RETRY}" || -f "${GRUB_RETRY}" ]]; then
+		[[ -f "${PROFILE_RETRY}" ]] && apply_tuning_profile && rm -f "${PROFILE_RETRY}"
+		[[ -f "${GRUB_RETRY}" ]] && refresh_grub_font && rm -f "${GRUB_RETRY}"
+		[[ -f "${PROFILE_RETRY}" || -f "${GRUB_RETRY}" ]] || systemctl disable armbian-firstrun
+		exit 0
+	fi
 
 	# Run a q&d benchmark to be able to identify cards way too slow easily
 	if command -v "iozone" > /dev/null 2>&1; then
@@ -80,6 +119,9 @@ case "$1" in
 	else
 		echo -e "\n### [firstrun] SSH host keys unchanged" >>${Log}
 	fi
+
+	_profile_failed=
+	apply_tuning_profile || _profile_failed=yes
 
 	# get rid of purple background color in newt apps whiptail, partimage, debconf ... Reverting to Debian look.
 	[[ -f /etc/newt/palette ]] && sed -e 's/magenta/blue/g' -i /etc/newt/palette
@@ -229,8 +271,21 @@ case "$1" in
 		fi
 	fi
 
+	# GRUB: pick the menu font for the panel of this machine
+	_grub_failed=
+	refresh_grub_font || _grub_failed=yes
+
 	# Remove KDE Neon base files upgrade pin
 	[[ -f /etc/apt/preferences.d/99-neon-base-files ]] && rm -f /etc/apt/preferences.d/99-neon-base-files
+
+	# Keep the service enabled after a failed tuning profile or GRUB refresh. The next boot retries only these.
+	if [[ -n "${_profile_failed}" ]]; then
+		mkdir -p "${PROFILE_RETRY%/*}" && touch "${PROFILE_RETRY}"
+	fi
+	if [[ -n "${_grub_failed}" ]]; then
+		mkdir -p "${GRUB_RETRY%/*}" && touch "${GRUB_RETRY}"
+	fi
+	[[ -n "${_profile_failed}${_grub_failed}" ]] && exit 0
 
 	systemctl disable armbian-firstrun
 	exit 0

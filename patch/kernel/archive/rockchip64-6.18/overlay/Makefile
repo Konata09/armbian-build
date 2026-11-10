@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+# Overlay names: see "Device tree overlay names" in config/boards/README.md of armbian/build.
 dtbo-$(CONFIG_ARCH_ROCKCHIP) += \
 	hinlink-h88k-240x135-lcd.dtbo \
 	rk35xx-radxa-zero-3w-ext-ant.dtbo \
@@ -48,6 +49,7 @@ dtbo-$(CONFIG_ARCH_ROCKCHIP) += \
 	rockchip-rk3399-w1-gpio.dtbo \
 	rockchip-rk3566-sata2.dtbo \
 	rockchip-rk3566-i2c2-m1.dtbo \
+	rockchip-rk3566-eltay-rm66-pdm.dtbo \
 	rockchip-rk3566-eltay-rm66-pocketterm35-touch-5d.dtbo \
 	rockchip-rk3566-i2c3-m0.dtbo \
 	rockchip-rk3566-i2c4-m0.dtbo \
@@ -58,6 +60,7 @@ dtbo-$(CONFIG_ARCH_ROCKCHIP) += \
 	rockchip-rk3566-uart3-m0.dtbo \
 	rockchip-rk3566-uart7-m2.dtbo \
 	rockchip-rk3566-uart9-m2.dtbo \
+	rockchip-rk3568-dshanpi-r1-disable-pcie.dtbo \
 	rockchip-rk3568-nanopi-r5c-leds.dtbo \
 	rockchip-rk3568-nanopi-r5s-leds.dtbo \
 	rockchip-rk3568-hk-i2c0.dtbo \
@@ -128,7 +131,8 @@ dtbo-$(CONFIG_ARCH_ROCKCHIP) += \
 	rockchip-rk3588-orangepi-5-ap6275p.dtbo
 
 scr-$(CONFIG_ARCH_ROCKCHIP) += \
-       rockchip-fixup.scr
+       rockchip-fixup.scr \
+       rockchip-rk3399-fixup.scr
 
 dtbotxt-$(CONFIG_ARCH_ROCKCHIP) += \
        README.rockchip-overlays

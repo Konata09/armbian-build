@@ -73,7 +73,10 @@ function pre_install_distribution_specific__recomputer_install_seeed_packages() 
 
 	declare -a pkgs=()
 	[[ "${SEEED_USB_GADGET_ENABLE:-"${SEEED_DEFAULT_ENABLE:-"yes"}"}" == "yes" ]] && pkgs+=(usbdevice-gadget-rk)
-	[[ "${SEEED_MORSE_ENABLE:-"${SEEED_DEFAULT_ENABLE:-"yes"}"}" == "yes" ]] && pkgs+=(wpa-supplicant-morse-tools morsectrl-tools hostapd-morse-tools morse-fgh100m-dkms)
+	# morse-halow metapackage pins the whole version-locked stack: driver,
+	# firmware (MorseMicro/morse-firmware 974c7744), hostapd/wpa_supplicant
+	# builds and morsectrl.
+	[[ "${SEEED_MORSE_ENABLE:-no}" == "yes" ]] && pkgs+=(morse-halow)
 
 	seeed_recomputer_install_from_apt "${pkgs[@]}" # this does nothing if array is empty
 
@@ -192,30 +195,6 @@ function post_family_tweaks__recomputer_enable_aic8800_bluetooth_service() {
 	fi
 }
 
-# Morse FGH100M firmware
-function post_family_tweaks_bsp__recomputer_fgh100m_morse_firmware() {
-	if [[ "${SEEED_MORSE_ENABLE:-"${SEEED_DEFAULT_ENABLE:-"yes"}"}" == "no" ]]; then
-		display_alert "$BOARD" "Skipping Seeed Morse FGH100M firmware (SEEED_MORSE_ENABLE=no)" "info"
-		return 0
-	fi
-
-	display_alert "$BOARD" "Installing Morse FGH100M firmware" "info"
-
-	local morse_fw_rev="commit:974c7744263ffb56a1c8678962e740fdcb3428f7"
-
-	fetch_from_repo "https://github.com/MorseMicro/morse-firmware.git" "morse-firmware" "${morse_fw_rev}" "yes"
-
-	local morse_fw_dir="${SRC}/cache/sources/morse-firmware/${morse_fw_rev#*:}"
-
-	if [[ -d "${morse_fw_dir}" ]]; then
-		install -d -m 0755 "${destination}/lib/firmware/morse"
-		install -m 0644 "${morse_fw_dir}/bcf/quectel/bcf_fgh100mhaamd.bin" "${destination}/lib/firmware/morse/bcf_default.bin"
-		install -m 0644 "${morse_fw_dir}/firmware/mm6108.bin" "${destination}/lib/firmware/morse/mm6108.bin"
-	else
-		display_alert "$BOARD" "morse-firmware not found at ${morse_fw_dir}" "warn"
-	fi
-}
-
 # USB gadget defaults (ACM + RNDIS, usb0 management link)
 function post_family_tweaks__recomputer_enable_usb_gadget_defaults() {
 	if [[ "${SEEED_USB_GADGET_ENABLE:-"${SEEED_DEFAULT_ENABLE:-"yes"}"}" == "no" ]]; then
@@ -263,30 +242,18 @@ function post_family_tweaks__recomputer_enable_usb_gadget_defaults() {
 		dhcp-option=option:dns-server
 	EOF
 
-	# serial-getty@ttyGS0: clear BindsTo=dev-ttyGS0.device from base unit
-	# (ttyGS0 is a USB gadget, not present at boot → BindsTo causes dependency failure).
-	# Keep Restart=always from base unit (not on-failure, else normal logout kills the getty).
-	#
-	# PrivateDevices=yes stays: it keeps getty restarts reliable across USB
-	# gadget re-bind cycles (#10313). But the private /dev it installs is a
-	# tmpfs with only systemd's minimal node set — DeviceAllow= filters cgroup
-	# device access, it does not create the ttyGS0 node. systemd opens
-	# TTYPath=/dev/ttyGS0 before entering the namespace, so agetty inherits
-	# working fds and prints the prompt; util-linux login however cannot map
-	# stdin back to /dev/ttyGS0 via ttyname(), dies with "FATAL: bad tty",
-	# and Restart=always turns that into an endless login loop. Run login in
-	# PID 1's mount namespace so it sees the real /dev again: setns does not
-	# change cgroup membership, so device filtering and the re-bind hang
-	# protection from #10313 are unaffected.
+	# serial-getty@ttyGS0: drop the boot-time BindsTo and keep Restart=always.
+	# PrivateDevices=no plus an explicit ttyGS0 argument avoids Noble's fatal
+	# ttyname(STDIN) failure. Keep systemd-executor off the gadget TTY: without
+	# a USB host, its pre-exec reset/probe blocks in n_tty_write. agetty opens
+	# ttyGS0 itself, and -w waits for CR. Fresh images keep the stock serial
+	# autologin helper, which firstlogin removes after setup.
 	mkdir -p "${SDCARD}/usr/local/bin"
 	cat > "${SDCARD}/usr/local/bin/login-ns.sh" <<- 'WRAPPER_EOF'
-	#!/bin/sh
-	# Run login in PID 1's mount namespace so /dev/ttyGS0 resolves again
-	# (the private /dev from PrivateDevices= has no such node). Required by
-	# serial-getty@ttyGS0. `exec` is mandatory: a non-exec nsenter keeps the
-	# wrapper shell alive sharing the tty fds with login, which wedges the
-	# password prompt.
-	exec nsenter -t 1 -m -- /bin/login "$@"
+#!/bin/sh
+# Run login in PID 1's mount namespace if a private /dev is ever restored;
+# no-op under PrivateDevices=no. `exec` avoids sharing tty fds with login.
+exec nsenter -t 1 -m -- /bin/login "$@"
 	WRAPPER_EOF
 	chmod 0755 "${SDCARD}/usr/local/bin/login-ns.sh"
 
@@ -299,12 +266,16 @@ function post_family_tweaks__recomputer_enable_usb_gadget_defaults() {
 
 		[Service]
 		RestartSec=3
-		PrivateDevices=yes
-		DeviceAllow=/dev/ttyGS0 rw
+		PrivateDevices=no
+		TTYPath=
+		TTYReset=no
+		TTYVHangup=no
+		StandardInput=null
+		StandardOutput=journal
+		StandardError=journal
 		ExecStart=
-		# -w: print nothing until the terminal sends CR, so boot-time output
-		# is not buffered and flushed as garbage on first connect
-		ExecStart=-/sbin/agetty -w -o '-- \\u' --noreset --noclear --keep-baud 115200,57600,38400,9600 -l /usr/local/bin/login-ns.sh - linux
+		# -w: no output until CR (avoids buffered boot garbage on first connect)
+		ExecStart=-/sbin/agetty -w -o '-- \\u' --noreset --noclear --keep-baud 115200,57600,38400,9600 -l /usr/local/bin/login-ns.sh ttyGS0 linux
 	EOF
 
 	chroot_sdcard systemctl --no-reload enable usbdevice.service

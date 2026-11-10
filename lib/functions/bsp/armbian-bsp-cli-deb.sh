@@ -232,7 +232,6 @@ function compile_armbian-bsp-cli() {
 	declare -a bsp_conffile_candidates=(
 		"/usr/lib/armbian/armbian-apt-updates"
 		"/etc/X11/xorg.conf.d/01-armbian-defaults.conf"
-		"/etc/apt/apt.conf.d/02-armbian-periodic"
 	)
 	declare bsp_conffile
 	: > "${destination}"/DEBIAN/conffiles
@@ -403,16 +402,9 @@ function board_side_bsp_cli_preinst() {
 	# fixing ramdisk corruption when using lz4 compression method
 	sed -i "s/^COMPRESS=.*/COMPRESS=gzip/" /etc/initramfs-tools/initramfs.conf
 
-	# swap
-	grep -q vm.swappiness /etc/sysctl.conf
-	case $? in
-		0)
-			sed -i 's/vm\.swappiness.*/vm.swappiness=100/' /etc/sysctl.conf
-			;;
-		*)
-			echo vm.swappiness=100 >> /etc/sysctl.conf
-			;;
-	esac
+	# Older BSP versions forced swappiness here. /etc/sysctl.conf is applied last and
+	# overrides the tuning profile, so remove that line. 55-bsp-default.conf has the fallback.
+	[[ -f /etc/sysctl.conf ]] && sed -i '/^[[:space:]]*vm\.swappiness[[:space:]]*=[[:space:]]*100[[:space:]]*$/d' /etc/sysctl.conf
 	# --system (not -p) so the change to /etc/sysctl.conf above *and* the
 	# drop-ins under /usr/lib/sysctl.d (our 55-bsp-default.conf) are applied on
 	# upgrade; -p reads only /etc/sysctl.conf and would leave them to next boot.
@@ -432,6 +424,7 @@ function board_side_bsp_cli_preinst() {
 	[[ -f "/etc/update-motd.d/10-header" ]] && rm /etc/update-motd.d/10-header
 	[[ -f "/etc/update-motd.d/30-sysinfo" ]] && rm /etc/update-motd.d/30-sysinfo
 	[[ -f "/etc/update-motd.d/35-tips" ]] && rm /etc/update-motd.d/35-tips
+	[[ -f "/etc/update-motd.d/quotes.txt" ]] && rm /etc/update-motd.d/quotes.txt
 	[[ -f "/etc/update-motd.d/40-updates" ]] && rm /etc/update-motd.d/40-updates
 	[[ -f "/etc/update-motd.d/98-autoreboot-warn" ]] && rm /etc/update-motd.d/98-autoreboot-warn
 	[[ -f "/etc/update-motd.d/99-point-to-faq" ]] && rm /etc/update-motd.d/99-point-to-faq
@@ -439,6 +432,24 @@ function board_side_bsp_cli_preinst() {
 	[[ -f "/etc/update-motd.d/80-livepatch" ]] && rm /etc/update-motd.d/80-livepatch
 	[[ -f "/etc/apt/apt.conf.d/02compress-indexes" ]] && rm /etc/apt/apt.conf.d/02compress-indexes
 	[[ -f "/etc/apt/apt.conf.d/02periodic" ]] && rm /etc/apt/apt.conf.d/02periodic
+	# automatic-update policy now lives only in armbian-config. Migrate systems off
+	# the BSP's periodic config, once: only while 02-armbian-periodic is still present.
+	# It set APT::Periodic::Enable "0", the master off-switch; with it gone,
+	# apt.systemd.daily defaults Enable to 1. So read the effective value BEFORE
+	# removing it (apt-config reads merged config, so a commented setting cannot count),
+	# then drop the stock unattended-upgrades trigger unless updates are enabled.
+	# armbian-config writes APT::Periodic::Enable "1" when a user opts in, so that case
+	# is preserved. Gating on the file means a later dpkg-reconfigure is left untouched.
+	if [[ -f "/etc/apt/apt.conf.d/02-armbian-periodic" ]]; then
+		if [[ "$(apt-config dump --format '%v%n' APT::Periodic::Enable 2>/dev/null)" != "1" ]]; then
+			# clear the debconf answer too, so a later unattended-upgrades postinst
+			# cannot recreate 20auto-upgrades with updates on
+			command -v debconf-set-selections >/dev/null 2>&1 && \
+				echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean false" | debconf-set-selections
+			rm -f /etc/apt/apt.conf.d/20auto-upgrades
+		fi
+		rm /etc/apt/apt.conf.d/02-armbian-periodic
+	fi
 	[[ -f "/etc/apt/apt.conf.d/no-languages" ]] && rm /etc/apt/apt.conf.d/no-languages
 	[[ -f "/etc/init.d/armhwinfo" ]] && rm /etc/init.d/armhwinfo
 	[[ -f "/etc/logrotate.d/armhwinfo" ]] && rm /etc/logrotate.d/armhwinfo
