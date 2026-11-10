@@ -1,0 +1,33 @@
+From 01d555dfe4c1284f9a6d2e957c302fe89ecde41c Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 18:13:44 +0800
+Subject: [PATCH 5/9] net: hisilicon: higmac-ascend: drop exports of now-static
+ PM helpers
+
+---
+ drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+index c396f2e27..3f26443fc 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+@@ -4248,7 +4248,6 @@ static int higmac_dev_suspend(struct platform_device *pdev, pm_message_t state)
+ 
+     return 0;
+ }
+-EXPORT_SYMBOL(higmac_dev_suspend);
+ 
+ static int higmac_dev_resume(struct platform_device *pdev)
+ {
+@@ -4319,7 +4318,6 @@ static int higmac_dev_resume(struct platform_device *pdev)
+ 
+     return 0;
+ }
+-EXPORT_SYMBOL(higmac_dev_resume);
+ #else
+ #define higmac_dev_suspend NULL
+ #define higmac_dev_resume NULL
+-- 
+2.43.0
+

@@ -1,0 +1,61 @@
+#!/bin/bash
+# Write the installed kernel and DTB into the DLAP-221 SD boot area.
+# The SPI flash loader reads both from raw areas on the SD card and has no
+# boot script, so the bootargs are written into the DTB here, built from
+# /boot/armbianEnv.txt (rootdev, verbosity, extraargs).
+#
+# Kernel hooks call this with the kernel version and image path.
+# The image build calls it with DLAP221_DEV and DLAP221_ROOT set.
+set -e
+
+version="$1"
+root="${DLAP221_ROOT:-}"
+dev="${DLAP221_DEV:-/dev/mmcblk0}"
+tool="${DLAP221_TOOL:-/usr/sbin/dlap221-boot}"
+
+if [[ -z "${DLAP221_DEV}" ]]; then
+	# act only on the board itself, never in an image build chroot
+	grep -qs "adlink,dlap-221" /proc/device-tree/compatible || exit 0
+fi
+if [[ -z "${version}" ]]; then
+	version=$(ls -1 "${root}"/boot/vmlinuz-* | sed 's|.*/vmlinuz-||' | sort -V | tail -n1)
+fi
+image="${root}/boot/vmlinuz-${version}"
+dtb="${root}/usr/lib/linux-image-${version}/hisilicon/hi1910-dlap221.dtb"
+env="${root}/boot/armbianEnv.txt"
+
+envvar() { sed -n "s/^$1=//p" "${env}" 2> /dev/null | tail -n1; }
+rootdev=$(envvar rootdev)
+verbosity=$(envvar verbosity)
+extraargs=$(envvar extraargs)
+
+# The loader can not load an initramfs, so the kernel must resolve root= by itself:
+# a device name or PARTUUID works, a filesystem UUID does not.
+case "${rootdev}" in
+	UUID=*)
+		part=$(blkid -U "${rootdev#UUID=}" || true)
+		partuuid=$([[ -n "${part}" ]] && blkid -s PARTUUID -o value "${part}" || true)
+		rootdev="${partuuid:+PARTUUID=${partuuid}}"
+		;;
+esac
+
+bootargs="console=ttyAMA0,115200 earlycon=pl011,mmio32,0x10cf80000 root=${rootdev:-/dev/mmcblk0p1} rootwait ro"
+bootargs+=" loglevel=${verbosity:-1} net.ifnames=0 cpuidle.off=1 mitigations=off rodata=noalias panic=30"
+bootargs+="${extraargs:+ ${extraargs}}"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "${tmp}"' EXIT
+"${tool}" mkdt "${dtb}" "${tmp}/dt.img" --base "${root}/usr/share/dlap221-boot/dt-dk.img" --bootargs "${bootargs}"
+"${tool}" pack "${image}" "${tmp}/Image.img" --tag Image
+
+if [[ -n "${DLAP221_DEV}" ]]; then
+	slots="main backup"
+else
+	# keep the kernel that booted last as the backup copy
+	"${tool}" backup "${dev}"
+	slots="main"
+fi
+for slot in ${slots}; do
+	"${tool}" write "${dev}" --slot "${slot}" --dt "${tmp}/dt.img" --kernel "${tmp}/Image.img"
+done
+echo "dlap221-boot: kernel ${version} written, bootargs: ${bootargs}"

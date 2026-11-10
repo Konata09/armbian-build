@@ -1,0 +1,2 @@
+# eth0 (higmac) has one RX queue, serviced on CPU0: spread protocol processing over CPU1-7
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth0", ATTR{queues/rx-0/rps_cpus}="fe"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Fixed random MAC address for eth0
+ConditionPathExists=!/etc/systemd/network/10-dlap221-eth0.link
+After=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/dlap221-eth0-mac
+
+[Install]
+WantedBy=multi-user.target

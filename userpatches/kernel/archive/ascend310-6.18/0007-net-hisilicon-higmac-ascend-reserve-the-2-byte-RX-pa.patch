@@ -1,0 +1,67 @@
+From 43d598cfc9d8b552049e656fbc5fb3888141e76b Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 22:09:52 +0800
+Subject: [PATCH 7/9] net: hisilicon: higmac-ascend: reserve the 2-byte RX pad
+ explicitly
+
+The MAC writes received frames 2 bytes into the RX buffer. The vendor code
+got the matching skb->data offset from netdev_alloc_skb_ip_align(), which
+no longer reserves anything on arm64 (NET_IP_ALIGN is 0), so every frame
+reached the stack shifted by two bytes and was dropped.
+---
+ drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c | 8 +++++---
+ drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h | 7 +++++++
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+index 2a782f9c9..299de31f2 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.c
+@@ -1504,21 +1504,23 @@ static void higmac_rx_refill(struct higmac_netdev_local *priv)
+         if (priv->rx_fq.skb[pos] || priv->rx_qmap[pos].skb)
+             break;
+ 
+-        skb = netdev_alloc_skb_ip_align(priv->netdev, len);
++        skb = netdev_alloc_skb(priv->netdev, len + HIGMAC_RX_PAD);
+         if (unlikely(skb == NULL)) {
+             higmac_err("alloc skb is null!\n");
+             break;
+         }
++        skb_reserve(skb, HIGMAC_RX_PAD);
+ 
++        /* hand the MAC the start of the pad; the frame lands at skb->data */
+         if (!HAS_CAP_CCI(priv->hw_cap)) {
+-            addr = dma_map_single(priv->dev, skb->data, len, DMA_FROM_DEVICE);
++            addr = dma_map_single(priv->dev, skb->data - HIGMAC_RX_PAD, len, DMA_FROM_DEVICE);
+             if (dma_mapping_error(priv->dev, addr)) {
+                 higmac_err("dma_map_single failed\n");
+                 dev_kfree_skb_any(skb);
+                 break;
+             }
+         } else {
+-            addr = virt_to_phys(skb->data);
++            addr = virt_to_phys(skb->data - HIGMAC_RX_PAD);
+         }
+ 
+         desc = priv->rx_fq.desc + pos;
+diff --git a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
+index 24efcea5b..4f56e24f9 100755
+--- a/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
++++ b/drivers/net/ethernet/hisilicon/higmac-ascend/higmac.h
+@@ -536,6 +536,13 @@ enum {
+ #define HIETH_MAX_FRAME_SIZE (1600 + 128)
+ #define SKB_SIZE (HIETH_MAX_FRAME_SIZE)
+ 
++/*
++ * The MAC stores each received frame 2 bytes into the buffer it is given
++ * (IP header alignment). The vendor driver relied on NET_IP_ALIGN being 2
++ * for this, but arm64 defines it as 0 since v6.x, so reserve it explicitly.
++ */
++#define HIGMAC_RX_PAD 2
++
+ #define DESC_VLD_FREE 0
+ #define DESC_VLD_BUSY 1
+ 
+-- 
+2.43.0
+
