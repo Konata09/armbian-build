@@ -1,0 +1,264 @@
+From b39db88327ff24aabe2d27ebb8223d365dbf2614 Mon Sep 17 00:00:00 2001
+From: "Claude (for konata09)" <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 02:57:23 +0800
+Subject: [PATCH 09/10] clk: hisilicon: add Ascend 310 A55 cluster PLL driver
+
+The Ascend 310 boot firmware programs the A55 cluster PLL (PLL5) to
+1.6 GHz, and the kernel has no way to change the CPU clock. Add a clock
+driver for the PLL so that its rate can be set from the device tree with
+assigned-clock-rates.
+
+The cluster has no clock mux to park on while the PLL is reprogrammed,
+and powering the PLL down would stop every CPU. The rate is changed by
+ramping the feedback multiplier in steps of 1/16 of the reference while
+the PLL keeps running; it follows without losing lock.
+
+PLL5 also feeds the SD/eMMC controller through its own dividers, so that
+driver needs to know the rate and keep it fixed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/hisilicon/Kconfig             |   8 +
+ drivers/clk/hisilicon/Makefile            |   1 +
+ drivers/clk/hisilicon/clk-ascend310-cpu.c | 200 ++++++++++++++++++++++
+ 3 files changed, 209 insertions(+)
+ create mode 100644 drivers/clk/hisilicon/clk-ascend310-cpu.c
+
+diff --git a/drivers/clk/hisilicon/Kconfig b/drivers/clk/hisilicon/Kconfig
+index c1ec75aa4..607a61db4 100644
+--- a/drivers/clk/hisilicon/Kconfig
++++ b/drivers/clk/hisilicon/Kconfig
+@@ -1,4 +1,12 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++config COMMON_CLK_ASCEND310_CPU
++	tristate "Ascend 310 A55 cluster PLL driver"
++	depends on ARCH_HISI || COMPILE_TEST
++	help
++	  Build the driver for the PLL that clocks the A55 cluster of the
++	  HiSilicon Ascend 310 (Hi1910), so that cpufreq can change the CPU
++	  clock.
++
+ config COMMON_CLK_HI3516CV300
+ 	tristate "HI3516CV300 Clock Driver"
+ 	depends on ARCH_HISI || COMPILE_TEST
+diff --git a/drivers/clk/hisilicon/Makefile b/drivers/clk/hisilicon/Makefile
+index 2978e56cb..aba2a762d 100644
+--- a/drivers/clk/hisilicon/Makefile
++++ b/drivers/clk/hisilicon/Makefile
+@@ -8,6 +8,7 @@ obj-y	+= clk.o clkgate-separated.o clkdivider-hi6220.o clk-hisi-phase.o
+ obj-$(CONFIG_ARCH_HI3xxx)	+= clk-hi3620.o
+ obj-$(CONFIG_ARCH_HIP04)	+= clk-hip04.o
+ obj-$(CONFIG_ARCH_HIX5HD2)	+= clk-hix5hd2.o
++obj-$(CONFIG_COMMON_CLK_ASCEND310_CPU)	+= clk-ascend310-cpu.o
+ obj-$(CONFIG_COMMON_CLK_HI3516CV300)	+= crg-hi3516cv300.o
+ obj-$(CONFIG_COMMON_CLK_HI3519)	+= clk-hi3519.o
+ obj-$(CONFIG_COMMON_CLK_HI3559A)	+= clk-hi3559a.o
+diff --git a/drivers/clk/hisilicon/clk-ascend310-cpu.c b/drivers/clk/hisilicon/clk-ascend310-cpu.c
+new file mode 100644
+index 000000000..c67a021c4
+--- /dev/null
++++ b/drivers/clk/hisilicon/clk-ascend310-cpu.c
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * HiSilicon Ascend 310 A55 cluster PLL
++ *
++ * The boot firmware on the LPM3 programs this PLL (PLL5 in the system
++ * controller) before it releases the A55 cluster from reset, and the
++ * cluster has no clock mux to park on while the PLL is reprogrammed.
++ * Powering the PLL down would stop every CPU, so the rate is changed while
++ * it runs: the feedback multiplier (fbdiv + frac / 2^24) is ramped in small
++ * steps, which the PLL follows without losing lock.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk-provider.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define PLL_CTRL0		0x0
++#define PLL_CTRL1		0x4
++
++#define CTRL0_REFDIV		GENMASK(5, 0)
++#define CTRL0_FBDIV		GENMASK(17, 6)
++#define CTRL0_POSTDIV1		GENMASK(20, 18)
++#define CTRL0_POSTDIV2		GENMASK(23, 21)
++#define CTRL1_FRAC		GENMASK(23, 0)
++#define FRAC_BITS		24
++
++/* the firmware leaves refdiv = postdiv1 = postdiv2 = 1; only the multiplier is changed */
++#define CTRL0_DIVIDERS		(CTRL0_REFDIV | CTRL0_POSTDIV1 | CTRL0_POSTDIV2)
++#define CTRL0_DIV1		(FIELD_PREP(CTRL0_REFDIV, 1) | \
++				 FIELD_PREP(CTRL0_POSTDIV1, 1) | \
++				 FIELD_PREP(CTRL0_POSTDIV2, 1))
++
++/* 1/16 of the reference (1.2 MHz) per step */
++#define MULT_STEP		BIT_ULL(FRAC_BITS - 4)
++#define STEP_DELAY_US		20
++
++#define RATE_MIN		1600000000UL
++#define RATE_MAX		2100000000UL
++
++struct ascend310_cpu_pll {
++	struct clk_hw hw;
++	void __iomem *base;
++};
++
++#define to_cpu_pll(_hw) container_of(_hw, struct ascend310_cpu_pll, hw)
++
++/* multiplier as fixed point with FRAC_BITS fractional bits */
++static u64 cpu_pll_get_mult(struct ascend310_cpu_pll *pll)
++{
++	u32 ctrl0 = readl(pll->base + PLL_CTRL0);
++	u32 ctrl1 = readl(pll->base + PLL_CTRL1);
++
++	return (u64)FIELD_GET(CTRL0_FBDIV, ctrl0) << FRAC_BITS |
++	       FIELD_GET(CTRL1_FRAC, ctrl1);
++}
++
++static void cpu_pll_set_mult(struct ascend310_cpu_pll *pll, u64 cur, u64 next)
++{
++	u32 ctrl0 = readl(pll->base + PLL_CTRL0) & ~CTRL0_FBDIV;
++	u32 fbdiv = next >> FRAC_BITS;
++	u32 frac = next & CTRL1_FRAC;
++
++	/*
++	 * fbdiv and frac live in two registers. Order the writes so that the
++	 * value in between is never above both ends of the step.
++	 */
++	if (fbdiv > cur >> FRAC_BITS) {
++		writel(frac, pll->base + PLL_CTRL1);
++		writel(ctrl0 | FIELD_PREP(CTRL0_FBDIV, fbdiv), pll->base + PLL_CTRL0);
++	} else if (fbdiv < cur >> FRAC_BITS) {
++		writel(ctrl0 | FIELD_PREP(CTRL0_FBDIV, fbdiv), pll->base + PLL_CTRL0);
++		writel(frac, pll->base + PLL_CTRL1);
++	} else {
++		writel(frac, pll->base + PLL_CTRL1);
++	}
++}
++
++static unsigned long cpu_pll_mult_to_rate(u64 mult, unsigned long parent_rate)
++{
++	return (parent_rate * mult + BIT_ULL(FRAC_BITS - 1)) >> FRAC_BITS;
++}
++
++static u64 cpu_pll_rate_to_mult(unsigned long rate, unsigned long parent_rate)
++{
++	return DIV_ROUND_CLOSEST_ULL((u64)rate << FRAC_BITS, parent_rate);
++}
++
++static unsigned long cpu_pll_recalc_rate(struct clk_hw *hw,
++					 unsigned long parent_rate)
++{
++	struct ascend310_cpu_pll *pll = to_cpu_pll(hw);
++	u32 ctrl0 = readl(pll->base + PLL_CTRL0);
++	u32 div = FIELD_GET(CTRL0_REFDIV, ctrl0) *
++		  FIELD_GET(CTRL0_POSTDIV1, ctrl0) *
++		  FIELD_GET(CTRL0_POSTDIV2, ctrl0);
++
++	if (!div)
++		return 0;
++	return cpu_pll_mult_to_rate(cpu_pll_get_mult(pll), parent_rate) / div;
++}
++
++static int cpu_pll_determine_rate(struct clk_hw *hw,
++				  struct clk_rate_request *req)
++{
++	unsigned long rate = clamp(req->rate, RATE_MIN, RATE_MAX);
++	u64 mult = cpu_pll_rate_to_mult(rate, req->best_parent_rate);
++
++	req->rate = cpu_pll_mult_to_rate(mult, req->best_parent_rate);
++	return 0;
++}
++
++static int cpu_pll_set_rate(struct clk_hw *hw, unsigned long rate,
++			    unsigned long parent_rate)
++{
++	struct ascend310_cpu_pll *pll = to_cpu_pll(hw);
++	u64 cur, target;
++
++	if ((readl(pll->base + PLL_CTRL0) & CTRL0_DIVIDERS) != CTRL0_DIV1)
++		return -EBUSY;
++	if (rate < RATE_MIN || rate > RATE_MAX)
++		return -EINVAL;
++
++	cur = cpu_pll_get_mult(pll);
++	target = cpu_pll_rate_to_mult(rate, parent_rate);
++	while (cur != target) {
++		u64 next;
++
++		if (target > cur)
++			next = min(cur + MULT_STEP, target);
++		else
++			next = max(cur - MULT_STEP, target);
++		cpu_pll_set_mult(pll, cur, next);
++		cur = next;
++		usleep_range(STEP_DELAY_US, 2 * STEP_DELAY_US);
++	}
++	return 0;
++}
++
++static const struct clk_ops cpu_pll_ops = {
++	.recalc_rate = cpu_pll_recalc_rate,
++	.determine_rate = cpu_pll_determine_rate,
++	.set_rate = cpu_pll_set_rate,
++};
++
++static int ascend310_cpu_pll_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct clk_init_data init = {};
++	struct clk_parent_data parent = { .index = 0 };
++	struct ascend310_cpu_pll *pll;
++	struct resource *res;
++	int ret;
++
++	pll = devm_kzalloc(dev, sizeof(*pll), GFP_KERNEL);
++	if (!pll)
++		return -ENOMEM;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return -EINVAL;
++	/* inside the system controller, which other drivers map as well */
++	pll->base = devm_ioremap(dev, res->start, resource_size(res));
++	if (!pll->base)
++		return -ENOMEM;
++
++	init.name = dev_name(dev);
++	init.ops = &cpu_pll_ops;
++	init.parent_data = &parent;
++	init.num_parents = 1;
++	pll->hw.init = &init;
++
++	ret = devm_clk_hw_register(dev, &pll->hw);
++	if (ret)
++		return ret;
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &pll->hw);
++}
++
++static const struct of_device_id ascend310_cpu_pll_of_match[] = {
++	{ .compatible = "hisilicon,ascend310-cpu-pll" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ascend310_cpu_pll_of_match);
++
++static struct platform_driver ascend310_cpu_pll_driver = {
++	.probe = ascend310_cpu_pll_probe,
++	.driver = {
++		.name = "ascend310-cpu-pll",
++		.of_match_table = ascend310_cpu_pll_of_match,
++	},
++};
++module_platform_driver(ascend310_cpu_pll_driver);
++
++MODULE_DESCRIPTION("HiSilicon Ascend 310 A55 cluster PLL driver");
++MODULE_LICENSE("GPL");
+-- 
+2.43.0
+

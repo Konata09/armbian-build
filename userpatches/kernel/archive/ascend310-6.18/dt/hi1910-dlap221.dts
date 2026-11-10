@@ -1342,7 +1342,6 @@
 		platform-type = <0x00>;
 		phy-mode = "rgmii-id";
 		phy-handle = <0x4e>;
-		/* no factory MAC on this board: fixed, randomly generated, locally administered */
 		/* the MAC issues cacheable AXI transactions: map rings and buffers cacheable, as on 4.19 */
 		dma-coherent;
 		status = "okay";
@@ -1369,6 +1368,9 @@
 		cd-gpios = <0x11 0x03 0x01>;
 		vmmc-supply = <0x4d>;
 		vqmmc-supply = <0x4c>;
+		/* the card clock is derived from PLL5 */
+		clocks = <&cpu_pll>;
+		clock-names = "pll5";
 		pinctrl-names = "default", "idle";
 		pinctrl-0 = <0x1a 0x1b 0x1c 0x1d 0x1e 0x1f 0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x2b 0x2c 0x2d 0x2e 0x2f>;
 		pinctrl-1 = <0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x3a 0x3b 0x3c 0x3d 0x3e 0x3f 0x40 0x41 0x42 0x43 0x44 0x45>;
@@ -1771,40 +1773,10 @@
 			reg = <0x00 0x00 0x00 0x7e00000>;
 		};
 
-		test@0x6fe00000 {
-			compatible = "for test";
-			no-map;
-			reg = <0x00 0x6fe00000 0x00 0x4000>;
-		};
-
-		bboxbuffer@0x6E00000 {
-			compatible = "bbox buffer";
-			no-map;
-			reg = <0x00 0x6e00000 0x00 0xf00000>;
-		};
-
 		l2buff@200000000 {
 			no-map;
 			reg = <0x02 0x00 0x00 0x800000>;
 			phandle = <0x0a>;
-		};
-
-		ts_sq@0x60000000 {
-			no-map;
-			reg = <0x00 0x60000000 0x00 0x2000000>;
-		};
-
-		trunk@0x6cc00000 {
-			compatible = "va2pa trunk";
-			no-map;
-			reg = <0x00 0x6cc00000 0x00 0x3200000>;
-			phandle = <0x0b>;
-		};
-
-		dma_cq_sq@0x7FF00000 {
-			compatible = "dma_cq_sq";
-			no-map;
-			reg = <0x00 0x7ff00000 0x00 0x100000>;
 		};
 
 		ramoops@9fff00000 {
@@ -1868,6 +1840,24 @@
 		status = "disabled";
 		compatible = "os_kbox";
 		reg = <0x00 0x71f0000 0x00 0x400000>;
+	};
+
+	osc19m2: clock-19200000 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <19200000>;
+		clock-output-names = "osc19m2";
+	};
+
+	/* PLL5 in the system controller: clocks the A55 cluster and the SD card */
+	cpu_pll: clock-controller@1100c0040 {
+		compatible = "hisilicon,ascend310-cpu-pll";
+		reg = <0x01 0x100c0040 0x00 0x8>;
+		clocks = <&osc19m2>;
+		#clock-cells = <0>;
+		/* the firmware sets 1.6 GHz; 2.0 GHz passed verified stress tests at its voltage */
+		assigned-clocks = <&cpu_pll>;
+		assigned-clock-rates = <2000000000>;
 	};
 
 	ascend_temp: temperature-sensor@a20000 {
