@@ -220,6 +220,26 @@
 };
 
 /*
+ * CPU overclock, together with the patched BL31 of rk35-3500.csc (PVTPLL
+ * ring 3 instead of 6 for the 1992 MHz rate). The real clock of this OPP
+ * follows vdd_cpu: 1.30 V gives about 2.32 GHz on this board (stock: 1.15 V,
+ * ring 6, 1.86 GHz). The rockchip-cpufreq driver probes before SCMI is up
+ * and gives up ("failed to init cpufreq"), so cpufreq-dt runs the table with
+ * plain opp-microvolt and none of the pvtm levels or low/high-temperature
+ * rules of cpu0_opp_table are in effect; the L0-L3 values only keep the
+ * table consistent. soc-thermal throttles the CPU from 75 C.
+ */
+&cpu0_opp_table {
+	opp-1992000000 {
+		opp-microvolt = <1300000 1300000 1300000>;
+		opp-microvolt-L0 = <1300000 1300000 1300000>;
+		opp-microvolt-L1 = <1300000 1300000 1300000>;
+		opp-microvolt-L2 = <1300000 1300000 1300000>;
+		opp-microvolt-L3 = <1300000 1300000 1300000>;
+	};
+};
+
+/*
  * &dmc (DDR frequency scaling) stays disabled: it never worked on the vendor
  * image either ("Cannot get the clk dmc_clk"), so the DDR runs at the fixed
  * frequency set up by the DDR init blob.

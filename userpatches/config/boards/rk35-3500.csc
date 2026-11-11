@@ -29,6 +29,71 @@ function post_family_config__rk35_3500_use_mainline_uboot() {
 	declare -g BOOTENV_FILE="rk35-3500.txt"
 }
 
+# CPU overclock, together with opp-1992000000 at 1.30 V in the board DTS.
+# The RK3568 CPU clock belongs to BL31 (SCMI clock 0), which accepts no rate above 1992 MHz. For the
+# rates from 1008 MHz up it runs the cores from the PVTPLL ring oscillator, so the real clock follows
+# vdd_cpu and the ring length, not the OPP rate. Stock BL31 uses ring length 6 for 1992 MHz: 1.86 GHz
+# at the stock 1.15 V on this board. Ring 3 at 1.30 V runs about 2.32 GHz (2.28 GHz hot) and passed
+# 10 minutes of stress-ng --verify and stressapptest; ring 2 hangs the board. Only the 1992 MHz row is
+# changed; 1800 MHz and below keep the stock rings and voltages.
+function post_family_config__rk35_3500_cpu_oc_bl31() {
+	declare -g RK35_3500_BL31_OC="${SRC}/cache/rk35-3500/$(basename "${BL31_BLOB}" .elf)-1992mhz-ring3.elf"
+	declare stock="${RKBIN_DIR}/${BL31_BLOB}"
+	[[ "${UBOOT_TARGET_MAP}" == *"BL31=${stock} "* ]] ||
+		exit_with_error "${BOARD}: BL31=${stock} not found in UBOOT_TARGET_MAP" "${UBOOT_TARGET_MAP}"
+	declare -g UBOOT_TARGET_MAP="${UBOOT_TARGET_MAP//"BL31=${stock} "/"BL31=${RK35_3500_BL31_OC} "}"
+}
+
+function pre_config_uboot_target__rk35_3500_cpu_oc_bl31() {
+	declare src="${RKBIN_DIR}/${BL31_BLOB}" dst="${RK35_3500_BL31_OC}"
+	# 1992 MHz row of the BL31 v1.44 CPU rate table (file offset), eight u32:
+	# rate, refdiv, fbdiv, postdiv1, postdiv2, dsmpd, frac, PVTPLL config = ring length << 3 | 3
+	declare -i row=$((0x4fb18))
+	declare -i cfg_offset=$((row + 28))
+	declare rate cfg
+	rate="$(od -An -tu4 -j "${row}" -N4 "${src}" | tr -d ' ')"
+	cfg="$(od -An -tx4 -j "${cfg_offset}" -N4 "${src}" | tr -d ' ')"
+	[[ "${rate}" == "1992000000" && "${cfg}" == "00000033" ]] ||
+		exit_with_error "${BOARD}: ${BL31_BLOB} has no 1992 MHz row with PVTPLL ring 6 at 0x4fb18" "rate=${rate} cfg=0x${cfg}"
+	mkdir -p "$(dirname "${dst}")"
+	cp "${src}" "${dst}"
+	printf '\x1b' | dd of="${dst}" bs=1 seek="${cfg_offset}" conv=notrunc status=none # ring 6 (0x33) -> 3 (0x1b)
+	display_alert "${BOARD}" "BL31 1992 MHz PVTPLL ring 6 -> 3: ${dst##*/}" "info"
+}
+
+# DDR overclock: the DDR init blob (U-Boot TPL) trains the LPDDR4X at this clock in MHz, stock 1560.
+# The memory is one CXMT CXDB5CCAM-MK (LPDDR4X-3733, i.e. 1866 MHz). Every step up to 1944 MHz trained
+# and passed stressapptest; bandwidth (4 threads, copy/read/write GB/s) 1560: 4.68/5.85/6.13,
+# 1848: 5.27/6.81/7.05, 1944: 5.56/7.03/7.45. Set RK35_3500_LPDDR4X_MHZ=1560 for the stock blob.
+declare -g RK35_3500_LPDDR4X_MHZ="${RK35_3500_LPDDR4X_MHZ:-1944}"
+
+function post_family_config__rk35_3500_ddr_oc() {
+	[[ "${RK35_3500_LPDDR4X_MHZ}" == "1560" ]] && return 0
+	declare -g RK35_3500_DDR_OC="${SRC}/cache/rk35-3500/$(basename "${DDR_BLOB}" .bin)-lp4x-${RK35_3500_LPDDR4X_MHZ}MHz.bin"
+	declare stock="${RKBIN_DIR}/${DDR_BLOB}"
+	[[ "${UBOOT_TARGET_MAP}" == *"ROCKCHIP_TPL=${stock}"* ]] ||
+		exit_with_error "${BOARD}: ROCKCHIP_TPL=${stock} not found in UBOOT_TARGET_MAP" "${UBOOT_TARGET_MAP}"
+	declare -g UBOOT_TARGET_MAP="${UBOOT_TARGET_MAP//"ROCKCHIP_TPL=${stock}"/"ROCKCHIP_TPL=${RK35_3500_DDR_OC}"}"
+}
+
+function pre_config_uboot_target__rk35_3500_ddr_oc() {
+	[[ "${RK35_3500_LPDDR4X_MHZ}" == "1560" ]] && return 0
+	declare src="${RKBIN_DIR}/${DDR_BLOB}" dst="${RK35_3500_DDR_OC}"
+	# LPDDR4X frequencies of the v1.21 blob, the field rkbin's ddrbin_tool.py edits as lp4x_freq:
+	# u32 at 0xdebc, bits 11:0 = final frequency (1560 MHz), bits 23:12 = F1 (324 MHz)
+	declare -i offset=$((0xdebc))
+	declare word
+	word="$(od -An -tx4 -j "${offset}" -N4 "${src}" | tr -d ' ')"
+	grep -q -a "typ 24/01/20-15:04:19,fwver: v1.21" "${src}" && [[ "${word}" == "00144618" ]] ||
+		exit_with_error "${BOARD}: ${DDR_BLOB} is not the v1.21 blob with LPDDR4X 1560 MHz at 0xdebc" "word=0x${word}"
+	declare -i new=$(((0x${word} & ~0xfff) | RK35_3500_LPDDR4X_MHZ))
+	mkdir -p "$(dirname "${dst}")"
+	cp "${src}" "${dst}"
+	printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((new & 0xff)) $((new >> 8 & 0xff)) $((new >> 16 & 0xff)) $((new >> 24)))" |
+		dd of="${dst}" bs=1 seek="${offset}" conv=notrunc status=none
+	display_alert "${BOARD}" "DDR blob LPDDR4X 1560 -> ${RK35_3500_LPDDR4X_MHZ} MHz: ${dst##*/}" "info"
+}
+
 # Kernel configuration of this board, on top of linux-rk35xx-vendor-next.config:
 #  - LED class drivers and the commonly used triggers
 #  - no self-protection/hardening features and nothing else that costs performance
