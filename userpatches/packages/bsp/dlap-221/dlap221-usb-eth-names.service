@@ -1,0 +1,14 @@
+[Unit]
+Description=Fixed names for the USB Ethernet ports
+DefaultDependencies=no
+After=systemd-udev-trigger.service systemd-udevd.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/dlap221-usb-eth-names
+
+[Install]
+WantedBy=sysinit.target
