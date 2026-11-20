@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+#include "rk3399-u-boot.dtsi"
+
+&vcc5v0_host {
+	regulator-always-on;
+};
+
+&vdd_center {
+	regulator-min-microvolt = <950000>;
+	regulator-max-microvolt = <950000>;
+};
+
+&vdd_log {
+	regulator-init-microvolt = <950000>;
+};
+
+/*
+ * Cap SD card speed in SPL/U-Boot to avoid data CRC errors during boot.
+ */
+&sdmmc {
+	/delete-property/ clock-freq-min-max;
+	max-frequency = <25000000>;
+};

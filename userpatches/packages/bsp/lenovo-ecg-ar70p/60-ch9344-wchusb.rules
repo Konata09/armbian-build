@@ -1,0 +1,2 @@
+# Provide legacy /dev/ttyWCHUSB* compatibility symlinks for onboard CH9344 quad UART (1a86:e018)
+SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB[0-9]*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e018", SYMLINK+="ttyWCHUSB%n"

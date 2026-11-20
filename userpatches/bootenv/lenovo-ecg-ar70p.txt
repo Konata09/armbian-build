@@ -1,0 +1,5 @@
+verbosity=1
+bootlogo=false
+console=both
+serialcon=ttyS2
+extraargs=cma=256M mitigations=off
