@@ -1,5 +1,6 @@
-verbosity=1
+verbosity=7
 bootlogo=false
-console=both
+console=serial
 serialcon=ttyS2
 extraargs=cma=256M mitigations=off
+docker_optimizations=off

@@ -16,6 +16,16 @@
 };
 
 /*
+ * Cap eMMC to 8-bit High Speed (52 MHz) in U-Boot: Samsung AJTD4R eMMC fails
+ * block reads under U-Boot's Arasan SDHCI HS400ES mode. Linux still uses HS400ES.
+ */
+&sdhci {
+	/delete-property/ mmc-hs400-1_8v;
+	/delete-property/ mmc-hs400-enhanced-strobe;
+	/delete-property/ mmc-hs200-1_8v;
+};
+
+/*
  * Cap SD card speed in SPL/U-Boot to avoid data CRC errors during boot.
  */
 &sdmmc {

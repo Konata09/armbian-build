@@ -1,4 +1,4 @@
-# Rockchip RK3399 hexa core 4GB LPDDR4 16GB eMMC GbE 2nd-LAN(SR9900) 4xUART(CH9344) Type-C/DP HDMI WiFi/BT
+# Rockchip RK3399 hexa core 4GB LPDDR4 16GB eMMC GbE 2nd-LAN(SR9900) 4xUART(CH9344) USB3/Type-C WiFi/BT
 BOARD_NAME="Lenovo ECG-AR70P"
 BOARD_VENDOR="lenovo"
 BOARDFAMILY="rk35xx"
@@ -10,8 +10,8 @@ BOOTCONFIG="lenovo-ecg-ar70p-rk3399_defconfig"
 # encode & decode (MPP vepu2 H.264/VP8/JPEG encode + vdpu2/rkvdec 4K H.264/HEVC/VP9 decode + IEP + RGA2).
 KERNEL_TARGET="vendor-next"
 KERNEL_TEST_TARGET="vendor-next"
-FULL_DESKTOP="yes"
-BOOT_LOGO="desktop"
+FULL_DESKTOP="no"
+BOOT_LOGO="no"
 BOOT_FDT_FILE="rockchip/rk3399-lenovo-ecg-ar70p.dtb"
 BOOT_SCENARIO="binman-atf-mainline"
 DDR_BLOB="rk33/rk3399_ddr_800MHz_v1.27.bin"
@@ -45,21 +45,25 @@ function post_config_uboot_target__lenovo_ecg_ar70p_features() {
 }
 
 # Kernel configuration on top of linux-rk35xx-vendor-next.config:
-#  - RK3399 MPP video codecs, RGA2, IEP, Panfrost GPU, CH9344 quad-UART, SR9900 CDC-Ethernet, Type-C DP
+#  - Headless multimedia: RK3399 MPP video codecs, RGA2, IEP (GPU and display drivers disabled)
+#  - Board peripherals: CH9344 quad-UART, SR9900 CDC-Ethernet, Type-C USB3/OTG, ES8316 audio, RK808 PMIC
 #  - Common LED class drivers and triggers
 #  - Performance optimization (-O2) with CPU mitigations and hardening disabled
 function custom_kernel_config__lenovo_ecg_ar70p() {
-	display_alert "$BOARD" "Enabling RK3399 hardware/codecs + LED triggers, disabling mitigations and hardening" "info"
+	display_alert "$BOARD" "Headless MPP codecs + LED triggers on, GPU/display/mitigations/hardening off" "info"
 
-	# Board & multimedia hardware support
+	# Board & headless hardware video codec / 2D acceleration
 	opts_y+=("CPU_RK3399" "ROCKCHIP_OPP" "ROCKCHIP_PVTM"
+		"MFD_RK808" "REGULATOR_RK808" "COMMON_CLK_RK808" "RTC_DRV_RK808"
 		"ROCKCHIP_MPP_SERVICE" "ROCKCHIP_MPP_VEPU2" "ROCKCHIP_MPP_VDPU2" "ROCKCHIP_MPP_RKVDEC"
 		"ROCKCHIP_MULTI_RGA" "IEP"
-		"TYPEC_FUSB302" "TYPEC_DP_ALTMODE"
+		"TYPEC_FUSB302"
 		"SND_SOC_ES8316" "SND_SIMPLE_CARD")
-	opts_m+=("USB_NET_CDCETHER" "USB_SERIAL_CH9344" "DRM_PANFROST")
-	# Use Mesa Panfrost on Mali-T860 instead of vendor Mali kbase (which also enables MALI_DEBUG)
-	kernel_config_force_n "MALI_MIDGARD" "MALI_VALHALL"
+	opts_m+=("USB_NET_CDCETHER" "USB_SERIAL_CH9344")
+
+	# Disable GPU and display drivers (headless appliance)
+	kernel_config_force_n "MALI_MIDGARD" "MALI_VALHALL" "DRM_PANFROST" \
+		"DRM_ROCKCHIP" "ROCKCHIP_CDN_DP" "ROCKCHIP_DW_HDMI" "DRM_DW_HDMI_I2S_AUDIO"
 
 	# LED core, drivers and common triggers
 	opts_y+=("NEW_LEDS" "LEDS_CLASS" "LEDS_TRIGGERS" "LEDS_GPIO" "LEDS_PWM")
@@ -108,6 +112,13 @@ function post_family_tweaks_bsp__lenovo_ecg_ar70p() {
 	install -d "${destination}/lib/firmware/brcm"
 	install -m 644 "${USERPATCHES_PATH}/packages/bsp/lenovo-ecg-ar70p/brcmfmac43456-sdio.lenovo,ecg-ar70p.txt" \
 		"${destination}/lib/firmware/brcm/brcmfmac43456-sdio.lenovo,ecg-ar70p.txt"
+	install -d "${destination}/etc/systemd/system/serial-getty@ttyS2.service.d"
+	cat > "${destination}/etc/systemd/system/serial-getty@ttyS2.service.d/autologin.conf" <<-'AUTOLOGIN'
+		[Service]
+		ExecStart=
+		ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 1500000,115200,57600,38400,9600 %I $TERM
+	AUTOLOGIN
+	chmod 644 "${destination}/etc/systemd/system/serial-getty@ttyS2.service.d/autologin.conf"
 }
 
 function post_family_tweaks__lenovo_ecg_ar70p_hold_packages() {
