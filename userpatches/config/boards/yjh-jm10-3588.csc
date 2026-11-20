@@ -58,3 +58,16 @@ function post_family_tweaks__JM10-3588_enable_services() {
 	chroot_sdcard systemctl enable rk3588-bluetooth.service
 	return 0
 }
+
+function image_specific_armbian_env_ready__yjh_jm10_3588_armbian_env() {
+	if grep -q '^verbosity=' "${SDCARD}/boot/armbianEnv.txt"; then
+		sed -i 's/^verbosity=.*/verbosity=7/' "${SDCARD}/boot/armbianEnv.txt"
+	else
+		echo 'verbosity=7' >> "${SDCARD}/boot/armbianEnv.txt"
+	fi
+	if grep -q '^docker_optimizations=' "${SDCARD}/boot/armbianEnv.txt"; then
+		sed -i 's/^docker_optimizations=.*/docker_optimizations=off/' "${SDCARD}/boot/armbianEnv.txt"
+	else
+		echo 'docker_optimizations=off' >> "${SDCARD}/boot/armbianEnv.txt"
+	fi
+}
