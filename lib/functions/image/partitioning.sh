@@ -91,12 +91,14 @@ function prepare_partitions() {
 	# mountopts[nfs] is empty
 
 	# default BOOTSIZE to use if not specified
-	DEFAULT_BOOTSIZE=256 # MiB
+	# One arm64 kernel in /boot is about 270 MiB: Image, initrd and uInitrd, and
+	# the DTBs of all vendors. A kernel upgrade keeps two kernels for a moment.
+	DEFAULT_BOOTSIZE=1024 # MiB
 	# FAT32 /boot has no symlinks, so the kernel package copies the image into
 	# place rather than linking it: /boot has to hold both vmlinuz-<ver> and the
-	# copy u-boot boots. 256 MiB does not fit that for two installed branches on
+	# copy u-boot boots. 512 MiB does not fit that for two installed branches on
 	# arm64, which is what leaves a kernel package stuck in iF.
-	DEFAULT_BOOTSIZE_FAT=512 # MiB
+	DEFAULT_BOOTSIZE_FAT=1024 # MiB
 	SECTOR_SIZE=${SECTOR_SIZE:-512}
 	# size of UEFI partition. 0 for no UEFI. Don't mix UEFISIZE>0 and BOOTSIZE>0
 	UEFISIZE=${UEFISIZE:-0}
@@ -354,15 +356,12 @@ function prepare_partitions() {
 				echo "UMASK=0077" > "${SDCARD}/etc/initramfs-tools/conf.d/key-umask.conf"
 				echo "" >> "${SDCARD}/etc/cryptsetup-initramfs/conf-hook"
 				echo "KEYFILE_PATTERN=${luks_key_file}" >> "${SDCARD}/etc/cryptsetup-initramfs/conf-hook"
-				# All copies of the image share this key. On first boot, give each its own.
-				if [[ -f "${SDCARD}/lib/systemd/system/armbian-luks-rekey.service" ]]; then
-					mkdir -p "${SDCARD}/etc/systemd/system/multi-user.target.wants"
-					ln -sf /lib/systemd/system/armbian-luks-rekey.service "${SDCARD}/etc/systemd/system/multi-user.target.wants/armbian-luks-rekey.service"
-				fi
+				# All copies of the image share this key. The user makes new keys
+				# with armbian-config (armbian-luks-rekey). It is not automatic.
 			fi
 			# map the LUKS container partition via its UUID to be the 'cryptroot' device
 			physical_root_part_uuid="$(blkid -s UUID -o value "$physical_rootdevice")"
-			echo "$CRYPTROOT_MAPPER UUID=${physical_root_part_uuid} ${luks_key_file} luks" >> "${SDCARD}/etc/crypttab"
+			echo "$CRYPTROOT_MAPPER UUID=${physical_root_part_uuid} ${luks_key_file} luks,initramfs" >> "${SDCARD}/etc/crypttab"
 			run_host_command_logged cat "${SDCARD}/etc/crypttab"
 		fi
 
@@ -465,7 +464,7 @@ function prepare_partitions() {
 	##
 
 	display_alert "Writing /tmp as tmpfs in chroot fstab" "$SDCARD/etc/fstab" "debug"
-	echo "tmpfs /tmp tmpfs defaults,nosuid 0 0" >> "${SDCARD}/etc/fstab"
+	echo "tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0" >> "${SDCARD}/etc/fstab"
 
 	call_extension_method "format_partitions" <<- 'FORMAT_PARTITIONS'
 		*if you created your own partitions, this would be a good time to format them*
@@ -535,18 +534,22 @@ function prepare_partitions() {
 
 	# complement extlinux config if it exists; remove armbianEnv in this case.
 	if [[ -f "${SDCARD}/boot/extlinux/extlinux.conf" ]]; then
-		local extlinux_cmdline="${MAIN_CMDLINE}"
-		# no splash without Plymouth (minimal images, no video output)
-		if [[ "${PLYMOUTH}" != "yes" ]]; then
+		local extlinux_cmdline="${SRC_CMDLINE} ${MAIN_CMDLINE}"
+		# splash only where the boot logo shows: same rule as bootlogo in armbianEnv.txt
+		local show_logo=no
+		if [[ "${PLYMOUTH}" == "yes" ]] && [[ "${BOOT_LOGO}" == "yes" || ("${BOOT_LOGO}" == "desktop" && "${BUILD_DESKTOP}" == "yes") ]]; then
+			show_logo=yes
+		fi
+		if [[ "${show_logo}" != "yes" ]]; then
 			local -a cmdline_words kept_words=()
 			local word
-			read -r -a cmdline_words <<< "${MAIN_CMDLINE}"
+			read -r -a cmdline_words <<< "${extlinux_cmdline}"
 			for word in "${cmdline_words[@]}"; do
-				[[ "${word}" == "splash" || "${word}" == plymouth.* ]] || kept_words+=("${word}")
+				[[ "${word}" == "splash" || "${word}" == splash=* || "${word}" == plymouth.* ]] || kept_words+=("${word}")
 			done
 			extlinux_cmdline="${kept_words[*]}"
 		fi
-		echo "  append root=$rootfs $SRC_CMDLINE $extlinux_cmdline" >> "${SDCARD}/boot/extlinux/extlinux.conf"
+		echo "  append root=$rootfs $extlinux_cmdline" >> "${SDCARD}/boot/extlinux/extlinux.conf"
 		display_alert "extlinux.conf exists" "removing armbianEnv.txt" "info"
 		[[ -f "${SDCARD}/boot/armbianEnv.txt" ]] && run_host_command_logged rm -v "${SDCARD}/boot/armbianEnv.txt"
 	fi
