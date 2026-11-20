@@ -161,7 +161,7 @@ case "$BOOT_SOC" in
 		;;
 
 	rk3566)
-		CPUMAX=${CPUMAX:="1800000"}
+		CPUMAX=${CPUMAX:="1992000"} # clamped to 1800000 unless the opp-2ghz overlay adds the 1992 MHz OPP
 		BOOT_SCENARIO="${BOOT_SCENARIO:=spl-blobs}"
 		DDR_BLOB="${DDR_BLOB:-"rk35/rk3566_ddr_1056MHz_v1.21.bin"}"
 		BL31_BLOB="${BL31_BLOB:-"rk35/rk3568_bl31_v1.44.elf"}"
@@ -392,11 +392,11 @@ write_uboot_platform_ufs() {
 	[[ $(type -t run_host_command_logged) == function ]] && logging_prelude="run_host_command_logged"
 
 	if [[ -f $1/idbloader.img && -f $1/u-boot.itb ]]; then
-		${logging_prelude} dd if=$1/idbloader.img of=$2 bs=4096 seek=8 conv=notrunc,fsync status=none
+		${logging_prelude} dd if=$1/idbloader.img of=$2 bs=4096 seek=8 conv=notrunc,fsync status=none || return 1
 		${logging_prelude} dd if=$1/u-boot.itb of=$3 bs=4096 seek=2048 conv=notrunc,fsync status=none
 	else
 		echo "write_uboot_platform_ufs: no idbloader.img + u-boot.itb pair in $1; board hook must override."
-		exit 1
+		return 1
 	fi
 }
 
