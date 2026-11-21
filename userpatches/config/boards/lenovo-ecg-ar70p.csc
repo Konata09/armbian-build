@@ -188,6 +188,9 @@ function post_family_tweaks_bsp__lenovo_ecg_ar70p() {
 	install -d "${destination}/lib/firmware/brcm"
 	install -m 644 "${USERPATCHES_PATH}/packages/bsp/lenovo-ecg-ar70p/brcmfmac43456-sdio.lenovo,ecg-ar70p.txt" \
 		"${destination}/lib/firmware/brcm/brcmfmac43456-sdio.lenovo,ecg-ar70p.txt"
+	install -d "${destination}/etc/modprobe.d"
+	install -m 644 "${USERPATCHES_PATH}/packages/bsp/lenovo-ecg-ar70p/blacklist-wifi-bt.conf" \
+		"${destination}/etc/modprobe.d/blacklist-wifi-bt.conf"
 	install -d "${destination}/etc/systemd/system/serial-getty@ttyS2.service.d"
 	cat > "${destination}/etc/systemd/system/serial-getty@ttyS2.service.d/autologin.conf" <<-'AUTOLOGIN'
 		[Service]

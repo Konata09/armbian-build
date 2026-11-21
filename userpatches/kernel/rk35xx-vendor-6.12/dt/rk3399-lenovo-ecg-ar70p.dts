@@ -226,6 +226,7 @@
 	assigned-clocks = <&cru SCLK_RMII_SRC>;
 	assigned-clock-parents = <&clkin_gmac>;
 	clock_in_out = "input";
+	phy-handle = <&rtl8211f>;
 	phy-supply = <&vcc3v3_lan>;
 	phy-mode = "rgmii-rxid";
 	pinctrl-names = "default";
@@ -236,6 +237,18 @@
 	tx_delay = <0x23>;
 	rx_delay = <0x9>;
 	status = "okay";
+
+	mdio {
+		compatible = "snps,dwmac-mdio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		rtl8211f: ethernet-phy@0 {
+			reg = <0>;
+			/* Mode B: LED0 = 1000M link, LED1 = 10/100/1000M link + TX/RX activity */
+			realtek,led-data = <0x8368>;
+		};
+	};
 };
 
 &gpu {
