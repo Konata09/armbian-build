@@ -834,13 +834,13 @@
 	center-supply = <&vdd_center>;
 	system-status-freq = <
 		/* system status        freq(KHz) */
-		SYS_STATUS_NORMAL       856000
+		SYS_STATUS_NORMAL       1200000
 		SYS_STATUS_REBOOT       856000
 		SYS_STATUS_SUSPEND      416000
-		SYS_STATUS_PERFORMANCE  856000
-		SYS_STATUS_BOOST        856000
+		SYS_STATUS_PERFORMANCE  1200000
+		SYS_STATUS_BOOST        1200000
 	>;
-	auto-min-freq = <856000>;
+	auto-min-freq = <1200000>;
 	auto-freq-en = <0>;
 };
 
@@ -850,6 +850,7 @@
 	opp-400000000 { status = "disabled"; };
 	opp-528000000 { status = "disabled"; };
 	opp-600000000 { status = "disabled"; };
+	opp-800000000 { status = "disabled"; };
 
 	opp-416000000 {
 		opp-hz = /bits/ 64 <416000000>;
@@ -867,40 +868,100 @@
 		opp-hz = /bits/ 64 <928000000>;
 		opp-microvolt = <950000>;
 	};
-	opp-960000000 {
-		opp-hz = /bits/ 64 <960000000>;
-		opp-microvolt = <975000>;
-	};
-	opp-1000000000 {
-		opp-hz = /bits/ 64 <1000000000>;
-		opp-microvolt = <975000>;
-	};
-	opp-1032000000 {
-		opp-hz = /bits/ 64 <1032000000>;
-		opp-microvolt = <1000000>;
-	};
 	opp-1056000000 {
 		opp-hz = /bits/ 64 <1056000000>;
-		opp-microvolt = <1000000>;
-	};
-	opp-1080000000 {
-		opp-hz = /bits/ 64 <1080000000>;
-		opp-microvolt = <1025000>;
+		opp-microvolt = <950000>;
 	};
 	opp-1104000000 {
 		opp-hz = /bits/ 64 <1104000000>;
-		opp-microvolt = <1025000>;
-	};
-	opp-1128000000 {
-		opp-hz = /bits/ 64 <1128000000>;
-		opp-microvolt = <1050000>;
+		opp-microvolt = <975000>;
 	};
 	opp-1152000000 {
 		opp-hz = /bits/ 64 <1152000000>;
-		opp-microvolt = <1050000>;
+		opp-microvolt = <1000000>;
 	};
 	opp-1200000000 {
 		opp-hz = /bits/ 64 <1200000000>;
-		opp-microvolt = <1050000>;
+		opp-microvolt = <1000000>;
+	};
+};
+
+/*
+ * CPU overclock: A53 1704 MHz @ 1.275 V / A72 2208 MHz @ 1.300 V.
+ * Every frequency uses an existing entry in drivers/clk/rockchip/clk-rk3399.c
+ * (rk3399_pll_rates, rk3399_cpuclkl_rates, rk3399_cpuclkb_rates), so no kernel
+ * or BL31 patch is required. Both rails stay within the RK3399 1.30 V datasheet
+ * absolute maximum.
+ */
+&cluster0_opp {
+	opp-1512000000 {
+		opp-hz = /bits/ 64 <1512000000>;
+		opp-microvolt = <1150000 1150000 1300000>;
+		opp-microvolt-L0 = <1150000 1150000 1300000>;
+		opp-microvolt-L1 = <1150000 1150000 1300000>;
+		opp-microvolt-L2 = <1150000 1150000 1300000>;
+		opp-microvolt-L3 = <1150000 1150000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+	opp-1608000000 {
+		opp-hz = /bits/ 64 <1608000000>;
+		opp-microvolt = <1200000 1200000 1300000>;
+		opp-microvolt-L0 = <1200000 1200000 1300000>;
+		opp-microvolt-L1 = <1200000 1200000 1300000>;
+		opp-microvolt-L2 = <1200000 1200000 1300000>;
+		opp-microvolt-L3 = <1200000 1200000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+	opp-1704000000 {
+		opp-hz = /bits/ 64 <1704000000>;
+		opp-microvolt = <1275000 1275000 1300000>;
+		opp-microvolt-L0 = <1275000 1275000 1300000>;
+		opp-microvolt-L1 = <1275000 1275000 1300000>;
+		opp-microvolt-L2 = <1275000 1275000 1300000>;
+		opp-microvolt-L3 = <1275000 1275000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+};
+
+&cluster1_opp {
+	opp-1896000000 {
+		opp-hz = /bits/ 64 <1896000000>;
+		opp-microvolt = <1225000 1225000 1300000>;
+		opp-microvolt-L0 = <1225000 1225000 1300000>;
+		opp-microvolt-L1 = <1225000 1225000 1300000>;
+		opp-microvolt-L2 = <1225000 1225000 1300000>;
+		opp-microvolt-L3 = <1225000 1225000 1300000>;
+		opp-microvolt-L4 = <1225000 1225000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+	opp-2016000000 {
+		opp-hz = /bits/ 64 <2016000000>;
+		opp-microvolt = <1250000 1250000 1300000>;
+		opp-microvolt-L0 = <1250000 1250000 1300000>;
+		opp-microvolt-L1 = <1250000 1250000 1300000>;
+		opp-microvolt-L2 = <1250000 1250000 1300000>;
+		opp-microvolt-L3 = <1250000 1250000 1300000>;
+		opp-microvolt-L4 = <1250000 1250000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+	opp-2088000000 {
+		opp-hz = /bits/ 64 <2088000000>;
+		opp-microvolt = <1275000 1275000 1300000>;
+		opp-microvolt-L0 = <1275000 1275000 1300000>;
+		opp-microvolt-L1 = <1275000 1275000 1300000>;
+		opp-microvolt-L2 = <1275000 1275000 1300000>;
+		opp-microvolt-L3 = <1275000 1275000 1300000>;
+		opp-microvolt-L4 = <1275000 1275000 1300000>;
+		clock-latency-ns = <40000>;
+	};
+	opp-2208000000 {
+		opp-hz = /bits/ 64 <2208000000>;
+		opp-microvolt = <1300000 1300000 1300000>;
+		opp-microvolt-L0 = <1300000 1300000 1300000>;
+		opp-microvolt-L1 = <1300000 1300000 1300000>;
+		opp-microvolt-L2 = <1300000 1300000 1300000>;
+		opp-microvolt-L3 = <1300000 1300000 1300000>;
+		opp-microvolt-L4 = <1300000 1300000 1300000>;
+		clock-latency-ns = <40000>;
 	};
 };
