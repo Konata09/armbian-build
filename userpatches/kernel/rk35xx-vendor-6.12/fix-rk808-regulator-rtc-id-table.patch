@@ -1,0 +1,39 @@
+From: Armbian Lenovo ECG-AR70P Port <armbian@localhost>
+Subject: [PATCH] mfd/rk808: add missing rk808-regulator and rk808-rtc platform IDs
+
+In Rockchip Linux 6.12, rk808_regulator_driver and rk808_rtc_driver define
+non-NULL .id_table (rk8xx_regulator_id_table and rk8xx_rtc_id_table) listing
+rk805/rk809/rk816/rk817/rk818 but omitting rk808-regulator and rk808-rtc.
+Because platform_match() does not fall back to driver.name when id_table is
+present, RK808 PMIC child devices never bind to their regulator or RTC drivers.
+
+Add the missing "rk808-regulator" and "rk808-rtc" entries to both tables.
+---
+ drivers/regulator/rk808-regulator.c | 1 +
+ drivers/rtc/rtc-rk808.c             | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/drivers/regulator/rk808-regulator.c b/drivers/regulator/rk808-regulator.c
+index 111111111111..222222222222 100644
+--- a/drivers/regulator/rk808-regulator.c
++++ b/drivers/regulator/rk808-regulator.c
+@@ -1774,6 +1774,7 @@ static int rk808_regulator_probe(struct platform_device *pdev)
+ 
+ static const struct platform_device_id rk8xx_regulator_id_table[] = {
+ 	{ "rk805-regulator", 0 },
++	{ "rk808-regulator", 0 },
+ 	{ "rk809-regulator", 0 },
+ 	{ "rk816-regulator", 0 },
+ 	{ "rk817-regulator", 0 },
+diff --git a/drivers/rtc/rtc-rk808.c b/drivers/rtc/rtc-rk808.c
+index 111111111111..222222222222 100644
+--- a/drivers/rtc/rtc-rk808.c
++++ b/drivers/rtc/rtc-rk808.c
+@@ -485,6 +485,7 @@ static int rk808_rtc_probe(struct platform_device *pdev)
+ 
+ static const struct platform_device_id rk8xx_rtc_id_table[] = {
+ 	{ "rk805-rtc", 0 },
++	{ "rk808-rtc", 0 },
+ 	{ "rk809-rtc", 0 },
+ 	{ "rk816-rtc", 0 },
+ 	{ "rk817-rtc", 0 },

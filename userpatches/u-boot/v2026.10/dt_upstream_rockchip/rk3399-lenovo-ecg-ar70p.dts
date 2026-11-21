@@ -16,9 +16,9 @@
 
 	aliases {
 		ethernet0 = &gmac;
-		mmc0 = &sdio0;
+		mmc0 = &sdhci;
 		mmc1 = &sdmmc;
-		mmc2 = &sdhci;
+		mmc2 = &sdio0;
 	};
 
 	chosen {
@@ -109,7 +109,7 @@
 		led-status {
 			gpios = <&gpio4 RK_PD6 GPIO_ACTIVE_LOW>;
 			label = "status_led";
-			linux,default-trigger = "heartbeat";
+			linux,default-trigger = "activity";
 		};
 	};
 
@@ -234,7 +234,7 @@
 	assigned-clock-parents = <&clkin_gmac>;
 	clock_in_out = "input";
 	phy-supply = <&vcc3v3_lan>;
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-rxid";
 	pinctrl-names = "default";
 	pinctrl-0 = <&rgmii_pins>;
 	snps,reset-gpio = <&gpio3 RK_PB7 GPIO_ACTIVE_LOW>;

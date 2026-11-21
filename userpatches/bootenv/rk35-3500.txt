@@ -1,5 +1,6 @@
-verbosity=1
+verbosity=7
 bootlogo=false
 console=both
 serialcon=ttyFIQ0
 extraargs=cma=256M
+docker_optimizations=off

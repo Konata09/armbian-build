@@ -29,3 +29,16 @@ function post_family_config__tn3568_max_use_mainline_uboot() {
 		dd "if=$1/u-boot-rockchip.bin" "of=$2" bs=32k seek=1 conv=notrunc status=none
 	}
 }
+
+function image_specific_armbian_env_ready__dg_tn3568_armbian_env() {
+	if grep -q '^verbosity=' "${SDCARD}/boot/armbianEnv.txt"; then
+		sed -i 's/^verbosity=.*/verbosity=7/' "${SDCARD}/boot/armbianEnv.txt"
+	else
+		echo 'verbosity=7' >> "${SDCARD}/boot/armbianEnv.txt"
+	fi
+	if grep -q '^docker_optimizations=' "${SDCARD}/boot/armbianEnv.txt"; then
+		sed -i 's/^docker_optimizations=.*/docker_optimizations=off/' "${SDCARD}/boot/armbianEnv.txt"
+	else
+		echo 'docker_optimizations=off' >> "${SDCARD}/boot/armbianEnv.txt"
+	fi
+}
